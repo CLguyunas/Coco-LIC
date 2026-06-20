@@ -22,6 +22,7 @@
 #include <ceres/dynamic_cost_function.h>
 
 #include <odom/trajectory_estimator.h>
+#include <odom/factor/analytic_diff/lidar_linearized_factor.h>
 #include <utils/ceres_callbacks.h>
 
 #include <iostream>
@@ -242,6 +243,57 @@ namespace cocolic
     std::vector<double *> vec;
     AddControlPointsNURBS(su.first - 3, vec);
     AddControlPointsNURBS(su.first - 3, vec, true);
+
+    ceres::LossFunction *loss_function = NULL;
+    problem_->AddResidualBlock(cost_function, loss_function, vec);
+  }
+
+
+  void TrajectoryEstimator::AddLinearizedLoamMeasurementNURBS(
+      const PointCorrespondence &pc, const SO3d &S_GtoM,
+      const Eigen::Vector3d &p_GinM, const SO3d &S_LtoI,
+      const Eigen::Vector3d &p_LinI, double weight,
+      const Eigen::Matrix<double, 6, 6> &pose_remap_matrix,
+      bool marg_this_factor)
+  {
+    int64_t time_ns = pc.t_point;
+    std::pair<int, double> su; // i u
+    trajectory_->GetIdxT(time_ns, su);
+
+    const int start_idx = su.first - 3;
+
+    Eigen::Matrix4d blending_matrix = trajectory_->blending_mats[start_idx];
+    Eigen::Matrix4d cumulative_blending_matrix = trajectory_->cumu_blending_mats[start_idx];
+
+    std::vector<double *> vec;
+    AddControlPointsNURBS(start_idx, vec);
+    AddControlPointsNURBS(start_idx, vec, true);
+
+    double const *parameters[8];
+    for (int i = 0; i < 8; ++i)
+      parameters[i] = vec[i];
+
+    analytic_derivative::LinearizedLoamFeatureNURBSData data;
+
+    const bool ok = analytic_derivative::LoamNURBSPoseRemapLinearizationHelper::Build(
+        pc,
+        su,
+        blending_matrix,
+        cumulative_blending_matrix,
+        S_GtoM,
+        p_GinM,
+        S_LtoI,
+        p_LinI,
+        weight,
+        parameters,
+        pose_remap_matrix,
+        &data);
+
+    if (!ok)
+      return;
+
+    ceres::CostFunction *cost_function =
+        new analytic_derivative::LinearizedLoamFeatureFactorNURBS(data);
 
     ceres::LossFunction *loss_function = NULL;
     problem_->AddResidualBlock(cost_function, loss_function, vec);
