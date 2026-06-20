@@ -53,6 +53,21 @@ namespace cocolic
     division_ = 0;
     use_marg_ = true;
 
+    // LiDAR degeneracy diagnostic configuration.
+// stage 1/2 only analyzes and logs, and must not change optimization.
+if (node["lidar_degeneracy"])
+{
+  lidar_degeneracy_param_ =
+      LidarDegeneracyParam(node["lidar_degeneracy"]);
+}
+else
+{
+  lidar_degeneracy_param_ = LidarDegeneracyParam();
+}
+
+lidar_degeneracy_analyzer_.reset(
+    new LidarDegeneracyAnalyzer(lidar_degeneracy_param_));
+
     opt_cnt = 0;
     t_opt_sum = 0.0;
 
@@ -370,23 +385,95 @@ namespace cocolic
     SO3d S_GtoM = SO3d(Eigen::Quaterniond::Identity());
     Eigen::Vector3d p_GinM = Eigen::Vector3d::Zero();
 
-    for (const auto &v : point_corrs)
+    // --------------------------------------------------------------------------
+    // Stage-1 LiDAR degeneracy diagnostic.
+    // This branch only reads point_corrs and trajectory_.
+    // It does not add Ceres residual blocks.
+    // It does not modify the original LiDAR factor.
+    // --------------------------------------------------------------------------
+    LidarDegeneracyReport lidar_deg_report;
+
+    if (lidar_degeneracy_param_.enable &&
+        lidar_degeneracy_param_.stage >= 1 &&
+        lidar_degeneracy_analyzer_)
     {
+      lidar_deg_report = lidar_degeneracy_analyzer_->Analyze(
+          point_corrs,
+          trajectory_,
+          opt_min_t_ns,
+          opt_max_t_ns,
+          tparam_.last_scan[1],
+          S_GtoM,
+          p_GinM,
+          S_LtoI,
+          p_LinI,
+          opt_weight_.lidar_weight,
+          use_lidar_scale);
+    }
+
+    // stage 1/2:
+    // keep original point-wise LiDAR factor unchanged.
+    // stage 3 route-B-local:
+    // each LiDAR residual uses its own time-block decision. A residual is
+    // replaced only if its t_point belongs to a degenerate local LiDAR block.
+    const bool allow_pose_remapped_lidar =
+        lidar_degeneracy_param_.enable &&
+        lidar_degeneracy_param_.stage >= 3 &&
+        lidar_degeneracy_param_.replace_lidar_when_degenerate &&
+        lidar_degeneracy_analyzer_;
+
+    const std::vector<bool> *remap_flags = nullptr;
+    const LidarDegeneracyAnalyzer::PoseRemapMatrixVector *remap_mats = nullptr;
+
+    if (allow_pose_remapped_lidar)
+    {
+      remap_flags = &lidar_degeneracy_analyzer_->last_use_remap_flags();
+      remap_mats = &lidar_degeneracy_analyzer_->last_pose_remap_matrices();
+    }
+
+    for (size_t i = 0; i < point_corrs.size(); ++i)
+    {
+      const auto &v = point_corrs[i];
+
       if (v.t_point < opt_min_t_ns)
         continue;
       if (v.t_point >= opt_max_t_ns)
         continue;
       if (v.t_point < tparam_.last_scan[1])
         continue;
-      if (use_lidar_scale)
+
+      const double lidar_weight =
+          use_lidar_scale ? (opt_weight_.lidar_weight * v.scale)
+                          : opt_weight_.lidar_weight;
+
+      const bool use_pose_remapped_lidar =
+          allow_pose_remapped_lidar &&
+          remap_flags &&
+          remap_mats &&
+          i < remap_flags->size() &&
+          i < remap_mats->size() &&
+          (*remap_flags)[i];
+
+      if (use_pose_remapped_lidar)
       {
-        estimator->AddLoamMeasurementAnalyticNURBS(v, S_GtoM, p_GinM, S_LtoI, p_LinI,
-                                                   opt_weight_.lidar_weight * v.scale);
+        estimator->AddLinearizedLoamMeasurementNURBS(
+            v,
+            S_GtoM,
+            p_GinM,
+            S_LtoI,
+            p_LinI,
+            lidar_weight,
+            (*remap_mats)[i]);
       }
       else
       {
-        estimator->AddLoamMeasurementAnalyticNURBS(v, S_GtoM, p_GinM, S_LtoI, p_LinI,
-                                                   opt_weight_.lidar_weight);
+        estimator->AddLoamMeasurementAnalyticNURBS(
+            v,
+            S_GtoM,
+            p_GinM,
+            S_LtoI,
+            p_LinI,
+            lidar_weight);
       }
     }
 
