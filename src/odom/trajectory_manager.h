@@ -18,6 +18,7 @@
 
 #pragma once
 #include <odom/trajectory_estimator.h>
+#include <odom/lidar_degeneracy_analyzer.h>
 #include <imu/imu_state_estimator.h>
 #include <spline/trajectory.h>
 #include <utils/log_utils.h>
@@ -242,6 +243,12 @@ namespace cocolic
     TimeParam tparam_;
 
     OptWeight opt_weight_;
+
+    // Stage-1 LiDAR degeneracy diagnostic.
+// stage 1/2 only analyzes and logs.
+// It must not change Ceres residual blocks.
+LidarDegeneracyParam lidar_degeneracy_param_;
+LidarDegeneracyAnalyzer::Ptr lidar_degeneracy_analyzer_;
 
     Eigen::Vector3d gravity_;
 
