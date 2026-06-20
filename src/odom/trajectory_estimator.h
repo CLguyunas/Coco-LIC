@@ -33,6 +33,7 @@
 
 #include <odom/factor/analytic_diff/image_feature_factor.h>
 #include <odom/factor/analytic_diff/lidar_feature_factor.h>
+#include <odom/factor/analytic_diff/lidar_linearized_factor.h>
 #include <odom/factor/analytic_diff/marginalization_factor.h>
 #include <odom/factor/analytic_diff/trajectory_value_factor.h>
 
@@ -202,6 +203,15 @@ namespace cocolic
                                          const SO3d &S_LtoI,
                                          const Eigen::Vector3d &p_LinI, double weight,
                                          bool marg_this_factor = false);
+
+    void AddLinearizedLoamMeasurementNURBS(const PointCorrespondence &pc,
+                                           const SO3d &S_GtoM,
+                                           const Eigen::Vector3d &p_GinM,
+                                           const SO3d &S_LtoI,
+                                           const Eigen::Vector3d &p_LinI,
+                                           double weight,
+                                           const Eigen::Matrix<double, 6, 6> &pose_remap_matrix,
+                                           bool marg_this_factor = false);
 
     void AddPhotometricMeasurementAnalyticNURBS(const double &prev_pixel_intensity,
                                                 const Eigen::Vector3d &visual_map_point,
