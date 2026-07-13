@@ -19,6 +19,8 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace cocolic
 {
@@ -42,6 +44,36 @@ namespace cocolic
     bool degenerate_state = false;
     int enter_counter = 0;
     int exit_counter = 0;
+
+    // Exact non-uniform B-spline support diagnostic. The support matrix is
+    // built from the same four-knot SO(3) analytic Jacobians and R3 basis
+    // coefficients used by LoamFeatureFactorNURBS, but without any geometry
+    // residual. Its generalized eigenvalues compare the timestamp support in
+    // the current scan with ideal uniform sampling of the same active knot
+    // intervals.
+    bool support_valid = false;
+    int support_control_point_num = 0;
+    int support_interval_num = 0;
+    int support_dimension = 0;
+    int support_effective_rank = 0;
+    int support_weak_direction_num = 0;
+    double support_time_span_s = 0.0;
+    double support_min_knot_dt_s = 0.0;
+    double support_max_knot_dt_s = 0.0;
+    double support_quality_min = 0.0;
+    double support_condition_number = 0.0;
+    double support_score = 0.0;
+    bool support_degenerate_state = false;
+    int support_enter_counter = 0;
+    int support_exit_counter = 0;
+    int support_weakest_knot_index = -1;
+    double support_weakest_knot_energy_ratio = 0.0;
+    double support_weakest_rotation_ratio = 0.0;
+    double support_boundary_energy_ratio = 0.0;
+
+    // -1 invalid, 0 healthy, 1 environment geometry, 2 spline support,
+    // 3 coupled environment-and-support degeneracy. This is diagnostic only.
+    int degeneracy_cause = -1;
 
     // Ascending order. The state order is [rotation, translation] in the map
     // frame. Rotation columns are normalized by characteristic_range before
@@ -86,6 +118,10 @@ namespace cocolic
                            double characteristic_range,
                            Eigen::Matrix<double, 1, 6> &jacobian) const;
 
+    void AnalyzeSplineSupport(
+        const std::vector<std::pair<int64_t, double>> &weighted_timestamps,
+        ObservabilityResult &result) const;
+
     void WriteCsvHeader();
     void WriteCsvRow(const ObservabilityResult &result);
     void PrintSummary(const ObservabilityResult &result) const;
@@ -107,10 +143,19 @@ namespace cocolic
     double min_characteristic_range_ = 1.0;
     double max_characteristic_range_ = 100.0;
 
+    bool support_enabled_ = true;
+    int support_reference_samples_per_interval_ = 32;
+    int support_max_control_points_ = 32;
+    double support_enter_quality_threshold_ = 2e-2;
+    double support_exit_quality_threshold_ = 5e-2;
+    int support_enter_consecutive_scans_ = 10;
+    int support_exit_consecutive_scans_ = 10;
+
     size_t scan_counter_ = 0;
     std::string csv_path_;
     std::ofstream csv_stream_;
     DegeneracyHysteresis degeneracy_hysteresis_;
+    DegeneracyHysteresis support_hysteresis_;
     ObservabilityResult last_result_;
   };
 

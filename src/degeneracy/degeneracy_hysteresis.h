@@ -51,15 +51,36 @@ namespace cocolic
         bool valid,
         const std::array<double, 6> &relative_eigenvalues)
     {
+      const double weakest_relative_eigenvalue = relative_eigenvalues[0];
+      int candidate_weak_direction_num = 0;
+      for (const double value : relative_eigenvalues)
+      {
+        if (std::isfinite(value) && value < enter_relative_threshold_)
+        {
+          ++candidate_weak_direction_num;
+        }
+      }
+
+      return Update(valid, weakest_relative_eigenvalue,
+                    candidate_weak_direction_num);
+    }
+
+    // Variable-dimensional information matrices (for example, a spline
+    // support matrix whose dimension changes with the active knot set) use
+    // this scalar overload. The caller supplies the weakest normalized mode
+    // and the number of modes below the configured enter threshold.
+    DegeneracyDecision Update(bool valid, double weakest_relative_eigenvalue,
+                              int candidate_weak_direction_num)
+    {
       DegeneracyDecision decision;
       decision.degenerate_state = degenerate_state_;
 
-      const double weakest_relative_eigenvalue = relative_eigenvalues[0];
       if (!valid || !std::isfinite(weakest_relative_eigenvalue) ||
           weakest_relative_eigenvalue < 0.0)
       {
-        // Missing geometry must not create an artificial transition. Requiring
-        // a fresh consecutive run after invalid data avoids stale counters.
+        // Missing evidence must not create an artificial transition.
+        // Requiring a fresh consecutive run after invalid data avoids stale
+        // counters.
         enter_counter_ = 0;
         exit_counter_ = 0;
         decision.enter_counter = enter_counter_;
@@ -67,15 +88,10 @@ namespace cocolic
         return decision;
       }
 
-      decision.degeneracy_score =
-          -std::log10(std::max(weakest_relative_eigenvalue, 1e-12));
-      for (const double value : relative_eigenvalues)
-      {
-        if (std::isfinite(value) && value < enter_relative_threshold_)
-        {
-          ++decision.candidate_weak_direction_num;
-        }
-      }
+      decision.degeneracy_score = -std::log10(
+          std::min(1.0, std::max(weakest_relative_eigenvalue, 1e-12)));
+      decision.candidate_weak_direction_num =
+          std::max(0, candidate_weak_direction_num);
 
       if (!degenerate_state_)
       {

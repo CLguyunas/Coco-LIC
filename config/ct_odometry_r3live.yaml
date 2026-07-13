@@ -57,6 +57,17 @@ dso_detect_only:
     exit_consecutive_scans: 10
     min_characteristic_range: 1.0
     max_characteristic_range: 100.0
+    # Stage 2: exact four-control-point NURBS support diagnostics. The quality
+    # is a generalized eigenvalue relative to ideal uniform sampling of the
+    # same active non-uniform knot intervals (1.0 is ideal; lower is weaker).
+    # This remains read-only and is not fed back into Ceres.
+    support_enabled: true
+    support_reference_samples_per_interval: 32
+    support_max_control_points: 32
+    support_enter_quality_threshold: 2.0e-2
+    support_exit_quality_threshold: 5.0e-2
+    support_enter_consecutive_scans: 10
+    support_exit_consecutive_scans: 10
 
 
 ### EvalutaionParams ###
