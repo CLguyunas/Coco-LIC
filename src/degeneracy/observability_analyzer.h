@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <degeneracy/degeneracy_hysteresis.h>
+
 #include <Eigen/Core>
 #include <lidar/lidar_feature.h>
 #include <spline/trajectory.h>
@@ -32,7 +34,14 @@ namespace cocolic
     size_t line_num = 0;
     double characteristic_range = 1.0;
     double condition_number = 0.0;
+    // Legacy hard-threshold count retained as a raw diagnostic.
     int weak_direction_num = 6;
+    // Candidate count and temporal state use the hysteresis enter threshold.
+    int candidate_weak_direction_num = 0;
+    double degeneracy_score = 0.0;
+    bool degenerate_state = false;
+    int enter_counter = 0;
+    int exit_counter = 0;
 
     // Ascending order. The state order is [rotation, translation] in the map
     // frame. Rotation columns are normalized by characteristic_range before
@@ -91,12 +100,17 @@ namespace cocolic
     int analyze_every_n_scans_ = 1;
     int print_every_n_scans_ = 20;
     double relative_eigenvalue_threshold_ = 1e-3;
+    double enter_relative_eigenvalue_threshold_ = 3e-3;
+    double exit_relative_eigenvalue_threshold_ = 6e-3;
+    int enter_consecutive_scans_ = 10;
+    int exit_consecutive_scans_ = 10;
     double min_characteristic_range_ = 1.0;
     double max_characteristic_range_ = 100.0;
 
     size_t scan_counter_ = 0;
     std::string csv_path_;
     std::ofstream csv_stream_;
+    DegeneracyHysteresis degeneracy_hysteresis_;
     ObservabilityResult last_result_;
   };
 

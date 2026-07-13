@@ -9,6 +9,7 @@
 #include <Eigen/Eigenvalues>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -49,12 +50,28 @@ namespace cocolic
     relative_eigenvalue_threshold_ =
         std::max(0.0, ReadValue<double>(
                           node, "relative_eigenvalue_threshold", 1e-3));
+    enter_relative_eigenvalue_threshold_ =
+        std::max(0.0, ReadValue<double>(
+                          node, "enter_relative_eigenvalue_threshold", 3e-3));
+    exit_relative_eigenvalue_threshold_ =
+        std::max(enter_relative_eigenvalue_threshold_,
+                 ReadValue<double>(
+                     node, "exit_relative_eigenvalue_threshold", 6e-3));
+    enter_consecutive_scans_ =
+        std::max(1, ReadValue<int>(node, "enter_consecutive_scans", 10));
+    exit_consecutive_scans_ =
+        std::max(1, ReadValue<int>(node, "exit_consecutive_scans", 10));
     min_characteristic_range_ =
         std::max(1e-3, ReadValue<double>(
                            node, "min_characteristic_range", 1.0));
     max_characteristic_range_ =
         std::max(min_characteristic_range_,
                  ReadValue<double>(node, "max_characteristic_range", 100.0));
+
+    degeneracy_hysteresis_.Configure(
+        enter_relative_eigenvalue_threshold_,
+        exit_relative_eigenvalue_threshold_, enter_consecutive_scans_,
+        exit_consecutive_scans_);
 
     if (!enabled_)
     {
@@ -77,8 +94,12 @@ namespace cocolic
     }
 
     std::cout << "[DSO-DetectOnly] enabled | min_corr="
-              << min_correspondences_ << " | rel_threshold="
-              << relative_eigenvalue_threshold_ << " | csv="
+              << min_correspondences_ << " | hard_threshold="
+              << relative_eigenvalue_threshold_ << " | enter/exit="
+              << enter_relative_eigenvalue_threshold_ << "/"
+              << exit_relative_eigenvalue_threshold_ << " | persistence="
+              << enter_consecutive_scans_ << "/" << exit_consecutive_scans_
+              << " | csv="
               << (csv_stream_.is_open() ? csv_path_ : std::string("disabled"))
               << std::endl;
   }
@@ -108,6 +129,20 @@ namespace cocolic
     }
 
     last_result_ = Analyze(scan_timestamp_ns, point_corrs);
+    std::array<double, 6> relative_eigenvalues;
+    for (int i = 0; i < 6; ++i)
+    {
+      relative_eigenvalues[static_cast<size_t>(i)] =
+          last_result_.relative_eigenvalues[i];
+    }
+    const DegeneracyDecision decision = degeneracy_hysteresis_.Update(
+        last_result_.valid, relative_eigenvalues);
+    last_result_.candidate_weak_direction_num =
+        decision.candidate_weak_direction_num;
+    last_result_.degeneracy_score = decision.degeneracy_score;
+    last_result_.degenerate_state = decision.degenerate_state;
+    last_result_.enter_counter = decision.enter_counter;
+    last_result_.exit_counter = decision.exit_counter;
     WriteCsvRow(last_result_);
 
     if (scan_counter_ == 1 ||
@@ -298,7 +333,9 @@ namespace cocolic
     }
 
     csv_stream_ << "scan_timestamp_s,valid,correspondence_num,plane_num,line_num,"
-                   "characteristic_range,condition_number,weak_direction_num";
+                   "characteristic_range,condition_number,weak_direction_num,"
+                   "candidate_weak_direction_num,degeneracy_score,"
+                   "degenerate_state,enter_counter,exit_counter";
     for (int i = 0; i < 6; ++i)
     {
       csv_stream_ << ",lambda_" << i;
@@ -333,7 +370,11 @@ namespace cocolic
                 << static_cast<int>(result.valid) << ','
                 << result.correspondence_num << ',' << result.plane_num << ','
                 << result.line_num << ',' << result.characteristic_range << ','
-                << result.condition_number << ',' << result.weak_direction_num;
+                << result.condition_number << ',' << result.weak_direction_num
+                << ',' << result.candidate_weak_direction_num << ','
+                << result.degeneracy_score << ','
+                << static_cast<int>(result.degenerate_state) << ','
+                << result.enter_counter << ',' << result.exit_counter;
     for (int i = 0; i < 6; ++i)
     {
       csv_stream_ << ',' << result.eigenvalues[i];
@@ -361,6 +402,11 @@ namespace cocolic
               << " s | valid=" << result.valid
               << " | corr=" << result.correspondence_num
               << " | weak=" << result.weak_direction_num
+              << " | candidate=" << result.candidate_weak_direction_num
+              << " | score=" << result.degeneracy_score
+              << " | state=" << static_cast<int>(result.degenerate_state)
+              << " | enter/exit=" << result.enter_counter << "/"
+              << result.exit_counter
               << " | rel_eigs="
               << result.relative_eigenvalues.transpose() << std::endl;
   }

@@ -47,7 +47,14 @@ dso_detect_only:
     min_correspondences: 30
     analyze_every_n_scans: 1
     print_every_n_scans: 20
+    # Legacy hard count, retained for raw diagnostics and compatibility.
     relative_eigenvalue_threshold: 1.0e-3
+    # Experimental temporal decision layer. These values are configurable and
+    # must be validated on additional scenes before claiming generality.
+    enter_relative_eigenvalue_threshold: 3.0e-3
+    exit_relative_eigenvalue_threshold: 6.0e-3
+    enter_consecutive_scans: 10
+    exit_consecutive_scans: 10
     min_characteristic_range: 1.0
     max_characteristic_range: 100.0
 
