@@ -37,6 +37,21 @@ accelerometer_noise_density: 2.425376259e-02
 accelerometer_random_walk: 1.96e-06         
 
 
+### DSO-DetectOnly ###
+# Read-only LiDAR 6DoF observability diagnostics. This does not add factors,
+# change weights, update the map, or alter the marginalization prior.
+dso_detect_only:
+    enabled: true
+    output_csv: true
+    use_correspondence_scale: true
+    min_correspondences: 30
+    analyze_every_n_scans: 1
+    print_every_n_scans: 20
+    relative_eigenvalue_threshold: 1.0e-3
+    min_characteristic_range: 1.0
+    max_characteristic_range: 100.0
+
+
 ### EvalutaionParams ###
 is_evo_viral: false
 

@@ -124,6 +124,11 @@ namespace cocolic
     is_evo_viral_ = node["is_evo_viral"].as<bool>();
     CreateCacheFolder(config_path, msg_manager_->bag_path_);
 
+    // DSO-DetectOnly reads LiDAR correspondences and the current trajectory,
+    // but never changes optimization factors, weights, the map, or priors.
+    observability_analyzer_ = std::make_shared<ObservabilityAnalyzer>(
+        node["dso_detect_only"], trajectory_, cache_path_);
+
     // gaussian-lic
     if_3dgs_ = node["if_3dgs"].as<bool>();
     lidar_skip_ = node["lidar_skip"].as<int>();
@@ -346,6 +351,17 @@ namespace cocolic
     for (int iter = 0; iter < lidar_iter_; ++iter)
     {
       lidar_handler_->GetLoamFeatureAssociation();
+
+      // Log the association produced immediately before the final LIC update.
+      // This call is deliberately read-only so detector enable/disable cannot
+      // alter the optimized trajectory.
+      if (observability_analyzer_ && observability_analyzer_->Enabled() &&
+          iter == lidar_iter_ - 1)
+      {
+        observability_analyzer_->AnalyzeAndLog(
+            msg.lidar_timestamp,
+            lidar_handler_->GetPointCorrespondence());
+      }
 
       if (process_image)
       {
