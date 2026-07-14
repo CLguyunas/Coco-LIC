@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <degeneracy/casr_shadow.h>
 #include <degeneracy/degeneracy_hysteresis.h>
 #include <degeneracy/support_degradation_injector.h>
 
@@ -72,6 +73,14 @@ namespace cocolic
     double support_weakest_rotation_ratio = 0.0;
     double support_boundary_energy_ratio = 0.0;
 
+    // Internal CASR bridge. Weak generalized knot modes are folded into the
+    // common scaled 6DoF order [r * dtheta, dt] by accumulating each active
+    // knot block's outer product. These fields are kept out of the legacy
+    // observability CSV and are consumed only by the shadow evaluator.
+    int support_pose_mode_num = 0;
+    Eigen::Matrix<double, 6, 6> support_pose_weakness =
+        Eigen::Matrix<double, 6, 6>::Zero();
+
     // -1 invalid, 0 healthy, 1 environment geometry, 2 spline support,
     // 3 coupled environment-and-support degeneracy. This is diagnostic only.
     int degeneracy_cause = -1;
@@ -123,6 +132,16 @@ namespace cocolic
       return last_injection_result_;
     }
 
+    const CasrShadowResult &LastCasrResult() const
+    {
+      return last_casr_result_;
+    }
+
+    const CasrShadowResult &LastInjectedCasrResult() const
+    {
+      return last_injected_casr_result_;
+    }
+
   private:
     ObservabilityResult Analyze(
         int64_t scan_timestamp_ns,
@@ -144,6 +163,10 @@ namespace cocolic
         const std::vector<WeightedTimestamp> &weighted_timestamps,
         const ObservabilityResult &original_result);
 
+    CasrShadowResult AnalyzeCasr(
+        const ObservabilityResult &environment_result,
+        const ObservabilityResult &support_result) const;
+
     void WriteCsvHeader();
     void WriteCsvRow(const ObservabilityResult &result);
     void WriteInjectionCsvHeader();
@@ -151,6 +174,12 @@ namespace cocolic
         int64_t scan_timestamp_ns,
         const ObservabilityResult &original_result,
         const SupportInjectionDiagnostic &injection_result);
+    void WriteCasrCsvHeader();
+    void WriteCasrCsvRow(
+        int64_t scan_timestamp_ns,
+        const ObservabilityResult &original_result,
+        const CasrShadowResult &real_result,
+        const CasrShadowResult *injected_result);
     void PrintSummary(const ObservabilityResult &result) const;
 
   private:
@@ -182,16 +211,24 @@ namespace cocolic
     bool support_injection_output_csv_ = true;
     SupportDegradationInjector support_injector_;
 
+    bool casr_shadow_enabled_ = false;
+    bool casr_shadow_output_csv_ = true;
+    CasrShadowEvaluator casr_shadow_evaluator_;
+
     size_t scan_counter_ = 0;
     std::string csv_path_;
     std::ofstream csv_stream_;
     std::string injection_csv_path_;
     std::ofstream injection_csv_stream_;
+    std::string casr_csv_path_;
+    std::ofstream casr_csv_stream_;
     DegeneracyHysteresis degeneracy_hysteresis_;
     DegeneracyHysteresis support_hysteresis_;
     DegeneracyHysteresis injected_support_hysteresis_;
     ObservabilityResult last_result_;
     SupportInjectionDiagnostic last_injection_result_;
+    CasrShadowResult last_casr_result_;
+    CasrShadowResult last_injected_casr_result_;
   };
 
 } // namespace cocolic

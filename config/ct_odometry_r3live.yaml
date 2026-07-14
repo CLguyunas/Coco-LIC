@@ -86,6 +86,20 @@ dso_detect_only:
         phase_start: 0.0
         phase_end: 1.0
         random_seed: 42
+    # Stage 3: cause-adaptive subspace recovery in shadow mode. It constructs
+    # and logs candidate 6DoF projectors but does not add a prior or change any
+    # estimator residual. A false shadow_only value is refused by the code.
+    casr_shadow:
+        enabled: true
+        shadow_only: true
+        output_csv: true
+        # Environment directions inside the hysteresis exit band remain
+        # eligible while the persistent environment state is active.
+        environment_relative_threshold: 6.0e-3
+        # Retain support-pose axes whose energy is at least 10% of the largest.
+        support_pose_relative_threshold: 1.0e-1
+        # cos(theta)>=0.7 defines a reliable common principal direction.
+        principal_cosine_threshold: 7.0e-1
 
 
 ### EvalutaionParams ###

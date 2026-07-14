@@ -54,12 +54,21 @@ dso_detect_only:
         phase_start: 0.0
         phase_end: 1.0
         random_seed: 42
+    casr_shadow:
+        enabled: true
+        shadow_only: true
+        output_csv: true
+        environment_relative_threshold: 6.0e-3
+        support_pose_relative_threshold: 1.0e-1
+        principal_cosine_threshold: 7.0e-1
 ```
 
 When the block is absent or `enabled` is `false`, no analysis is performed.
 Setting only `support_enabled: false` preserves the environment-space detector.
 The controlled injector is off by default and additionally requires
 `diagnostics_only: true`; the implementation refuses any other setting.
+CASR is also restricted to `shadow_only: true` in this stage. It emits a
+candidate projector but cannot add a residual, prior, or estimator weight.
 
 ## Output
 
@@ -233,6 +242,72 @@ sweep severity, and verify that injected support quality responds monotonically
 while the original support fields and trajectory accuracy stay inside repeated
 baseline variation.
 
+## Stage 3: CASR shadow recovery
+
+The first CASR stage converts the two diagnostic spaces into a common scaled
+6DoF coordinate order:
+
+```text
+[range * dtheta_x, range * dtheta_y, range * dtheta_z, dt_x, dt_y, dt_z].
+```
+
+The environment weak basis comes directly from the 6DoF eigenvectors whose
+relative eigenvalues remain inside `environment_relative_threshold` while the
+persistent environment state is active.
+
+The spline-support weak modes originally live in a `6K` control-point space.
+For every generalized mode below the support enter threshold, CASR takes each
+control point's six-element block, applies the same scene-range rotation scale
+as the environment detector, and accumulates its outer product. Per-knot outer
+products are used instead of summing the blocks, because alternating temporal
+modes can have opposite signs and must not cancel. The trace-normalized result
+is a 6-by-6 support-pose weakness matrix. When no raw mode is below the enter
+threshold, the weakest mode is still prepared as a fallback, but it is ignored
+unless support hysteresis is active.
+
+Let `U_e` and `U_s` be the active environment and support-pose bases. CASR
+computes the singular values of
+
+```text
+U_e^T U_s.
+```
+
+These are the principal-angle cosines. The normalized squared sum is logged as
+`overlap_score`. A common direction is retained only when its principal cosine
+is at least `principal_cosine_threshold`. This gives the shadow routing table:
+
+| Cause | Shadow route | Candidate projector |
+|---:|---|---|
+| `0` | `inactive` | zero |
+| `1` | `environment_candidate` | environment weak subspace |
+| `2` | `support_candidate` | support-pose weak subspace |
+| `3`, common direction exists | `coupled_common_candidate` | common weak subspace |
+| `3`, no reliable common direction | `coupled_conflict` | zero; defer action |
+
+The explicit conflict route is important: a coupled label alone is not enough
+to justify inventing a recovery direction. The later estimator-intervention
+stage may use different priors for exclusive directions, but this shadow stage
+only exports a projector that is geometrically supported by the measured
+subspaces.
+
+When enabled, CASR writes:
+
+```text
+config/data/degenerate_seq_02_casr_shadow.csv
+```
+
+Each row contains the real route and, when support injection is enabled, the
+injected-copy route. For both paths it records the cause, environment/support/
+common/recovery ranks, principal-cosine range, overlap and exclusive-energy
+ratios, support-pose eigenvalues, and the 21 upper-triangular entries of the
+symmetric recovery projector. The original 81-column observability CSV and
+45-column injection CSV remain unchanged.
+
+`CASR-Shadow` still does not modify Ceres, the spline, measurements, the map,
+or the marginalization prior. A configuration with `shadow_only: false` is
+refused. Therefore this stage validates the proposed direction-selection
+mechanism, not trajectory recovery performance.
+
 ## Baseline non-interference check
 
 Run the same bag twice, changing only `enabled`:
@@ -279,8 +354,13 @@ and the trajectory. A valid harness should show:
 5. `enabled: false` creates no injection CSV and preserves the previous path;
 6. ON/OFF trajectory differences remain within repeated-run scheduling noise.
 
-Together, an original run and an injected run provide the four cause cases
-needed to test the future cause-adaptive CASR router. They do not yet validate
-CASR recovery performance: CASR remains a later estimator intervention and
-must be evaluated separately against cause-specific accuracy and consistency
-metrics.
+Together, severity `0.5` and `0.75` runs provide the cause cases needed to
+validate the CASR shadow router. For the first CASR replay, keep the validated
+`timestamp_compression`, severity `0.75`, phase `0.0-1.0`, and seed `42`, then
+check that support-only frames select `support_candidate`, coupled frames
+select `coupled_common_candidate` or the explicit conflict route, every
+recovery projector is symmetric/idempotent within numerical tolerance, and
+the trajectory remains inside the repeated detector-OFF envelope. This still
+does not validate recovery accuracy; estimator intervention remains the next
+stage and must be evaluated separately with cause-specific ATE/RPE and
+consistency metrics.

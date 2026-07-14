@@ -136,6 +136,27 @@ namespace cocolic
     support_injector_.Configure(injection_config);
     support_injection_enabled_ = support_injector_.Enabled();
 
+    const YAML::Node casr_node =
+        node ? node["casr_shadow"] : YAML::Node();
+    const bool casr_requested =
+        ReadValue<bool>(casr_node, "enabled", false);
+    const bool casr_shadow_only =
+        ReadValue<bool>(casr_node, "shadow_only", true);
+    casr_shadow_output_csv_ =
+        ReadValue<bool>(casr_node, "output_csv", true);
+    CasrShadowConfig casr_config;
+    casr_config.enabled = casr_requested && casr_shadow_only &&
+                          support_enabled_;
+    casr_config.environment_relative_threshold = ReadValue<double>(
+        casr_node, "environment_relative_threshold",
+        exit_relative_eigenvalue_threshold_);
+    casr_config.support_pose_relative_threshold = ReadValue<double>(
+        casr_node, "support_pose_relative_threshold", 1e-1);
+    casr_config.principal_cosine_threshold = ReadValue<double>(
+        casr_node, "principal_cosine_threshold", 7e-1);
+    casr_shadow_evaluator_.Configure(casr_config);
+    casr_shadow_enabled_ = casr_shadow_evaluator_.Enabled();
+
     degeneracy_hysteresis_.Configure(
         enter_relative_eigenvalue_threshold_,
         exit_relative_eigenvalue_threshold_, enter_consecutive_scans_,
@@ -166,6 +187,15 @@ namespace cocolic
     {
       std::cerr << "[DSO-DetectOnly] support_injection disabled: unknown "
                 << "mode '" << injection_mode_name << "'.\n";
+    }
+    if (casr_requested && !casr_shadow_only)
+    {
+      std::cerr << "[CASR-Shadow] refused: shadow_only must remain true.\n";
+    }
+    if (casr_requested && !support_enabled_)
+    {
+      std::cerr << "[CASR-Shadow] disabled because support_enabled is "
+                   "false.\n";
     }
 
     csv_path_ = output_prefix + "_dso_observability.csv";
@@ -200,6 +230,22 @@ namespace cocolic
       }
     }
 
+    casr_csv_path_ = output_prefix + "_casr_shadow.csv";
+    if (casr_shadow_enabled_ && casr_shadow_output_csv_)
+    {
+      casr_csv_stream_.open(casr_csv_path_,
+                            std::ios::out | std::ios::trunc);
+      if (!casr_csv_stream_.is_open())
+      {
+        std::cerr << "[CASR-Shadow] Cannot open CSV: " << casr_csv_path_
+                  << ". Console diagnostics remain enabled.\n";
+      }
+      else
+      {
+        WriteCasrCsvHeader();
+      }
+    }
+
     std::cout << "[DSO-DetectOnly] enabled | min_corr="
               << min_correspondences_ << " | hard_threshold="
               << relative_eigenvalue_threshold_ << " | enter/exit="
@@ -210,7 +256,8 @@ namespace cocolic
               << " | support_enter/exit="
               << support_enter_quality_threshold_ << "/"
               << support_exit_quality_threshold_
-              << " | support_injection=" << support_injection_enabled_;
+              << " | support_injection=" << support_injection_enabled_
+              << " | casr_shadow=" << casr_shadow_enabled_;
     if (support_injection_enabled_)
     {
       const SupportInjectionConfig &config = support_injector_.Config();
@@ -224,6 +271,10 @@ namespace cocolic
     }
     std::cout << " | csv="
               << (csv_stream_.is_open() ? csv_path_ : std::string("disabled"))
+              << " | casr_csv="
+              << (casr_csv_stream_.is_open()
+                      ? casr_csv_path_
+                      : std::string("disabled"))
               << std::endl;
   }
 
@@ -238,6 +289,11 @@ namespace cocolic
     {
       injection_csv_stream_.flush();
       injection_csv_stream_.close();
+    }
+    if (casr_csv_stream_.is_open())
+    {
+      casr_csv_stream_.flush();
+      casr_csv_stream_.close();
     }
   }
 
@@ -302,6 +358,21 @@ namespace cocolic
       AnalyzeInjectedSupport(weighted_timestamps, last_result_);
       WriteInjectionCsvRow(scan_timestamp_ns, last_result_,
                            last_injection_result_);
+    }
+
+    if (casr_shadow_enabled_)
+    {
+      last_casr_result_ = AnalyzeCasr(last_result_, last_result_);
+      last_injected_casr_result_ = CasrShadowResult();
+      const CasrShadowResult *injected_casr = nullptr;
+      if (support_injection_enabled_)
+      {
+        last_injected_casr_result_ = AnalyzeCasr(
+            last_result_, last_injection_result_.injected_support);
+        injected_casr = &last_injected_casr_result_;
+      }
+      WriteCasrCsvRow(scan_timestamp_ns, last_result_, last_casr_result_,
+                      injected_casr);
     }
 
     if (scan_counter_ == 1 ||
@@ -838,6 +909,53 @@ namespace cocolic
       }
     }
 
+    // Fold the candidate weak knot modes into the same scaled 6DoF state
+    // used by the environment eigensystem. A physical rotation perturbation
+    // dtheta corresponds to r*dtheta in that state because the environment
+    // rotation Jacobian columns were divided by characteristic_range.
+    // Accumulating per-knot 6DoF outer products preserves axis information
+    // without cancelling the alternating signs of temporal spline modes.
+    CasrMatrix6 support_pose_weakness = CasrMatrix6::Zero();
+    int support_pose_mode_num = 0;
+    const int candidate_pose_mode_num = std::max(1, weak_direction_num);
+    for (int mode_index = 0; mode_index < candidate_pose_mode_num;
+         ++mode_index)
+    {
+      Eigen::VectorXd scaled_mode =
+          whitening * quality_solver.eigenvectors().col(mode_index);
+      for (int local_index = 0; local_index < control_point_num;
+           ++local_index)
+      {
+        scaled_mode.segment<3>(6 * local_index) *=
+            result.characteristic_range;
+      }
+      const double scaled_norm = scaled_mode.norm();
+      if (!std::isfinite(scaled_norm) || scaled_norm <= 1e-12)
+      {
+        continue;
+      }
+      scaled_mode /= scaled_norm;
+      for (int local_index = 0; local_index < control_point_num;
+           ++local_index)
+      {
+        const CasrVector6 knot_mode =
+            scaled_mode.segment<6>(6 * local_index);
+        support_pose_weakness.noalias() +=
+            knot_mode * knot_mode.transpose();
+      }
+      ++support_pose_mode_num;
+    }
+    const double support_pose_trace = support_pose_weakness.trace();
+    if (std::isfinite(support_pose_trace) && support_pose_trace > 1e-12)
+    {
+      support_pose_weakness /= support_pose_trace;
+    }
+    else
+    {
+      support_pose_weakness.setZero();
+      support_pose_mode_num = 0;
+    }
+
     result.support_valid = true;
     result.support_control_point_num = control_point_num;
     result.support_interval_num =
@@ -858,6 +976,8 @@ namespace cocolic
         std::max(0.0, max_knot_energy);
     result.support_weakest_rotation_ratio = rotation_energy;
     result.support_boundary_energy_ratio = boundary_energy;
+    result.support_pose_mode_num = support_pose_mode_num;
+    result.support_pose_weakness = support_pose_weakness;
   }
 
   void ObservabilityAnalyzer::AnalyzeInjectedSupport(
@@ -872,6 +992,7 @@ namespace cocolic
     ObservabilityResult &injected =
         last_injection_result_.injected_support;
     injected.scan_timestamp_ns = original_result.scan_timestamp_ns;
+    injected.characteristic_range = original_result.characteristic_range;
     AnalyzeSplineSupport(injected_timestamps, injected);
 
     const DegeneracyDecision decision = injected_support_hysteresis_.Update(
@@ -890,6 +1011,22 @@ namespace cocolic
           (original_result.degenerate_state ? 1 : 0) +
           (injected.support_degenerate_state ? 2 : 0);
     }
+  }
+
+  CasrShadowResult ObservabilityAnalyzer::AnalyzeCasr(
+      const ObservabilityResult &environment_result,
+      const ObservabilityResult &support_result) const
+  {
+    CasrShadowInput input;
+    input.environment_valid = environment_result.valid;
+    input.support_valid = support_result.support_valid;
+    input.environment_state = environment_result.degenerate_state;
+    input.support_state = support_result.support_degenerate_state;
+    input.environment_relative_eigenvalues =
+        environment_result.relative_eigenvalues;
+    input.environment_eigenvectors = environment_result.eigenvectors;
+    input.support_pose_weakness = support_result.support_pose_weakness;
+    return casr_shadow_evaluator_.Evaluate(input);
   }
 
   void ObservabilityAnalyzer::WriteCsvHeader()
@@ -1089,6 +1226,130 @@ namespace cocolic
     injection_csv_stream_.flush();
   }
 
+  void ObservabilityAnalyzer::WriteCasrCsvHeader()
+  {
+    if (!casr_csv_stream_.is_open())
+    {
+      return;
+    }
+
+    casr_csv_stream_
+        << "scan_timestamp_s,environment_valid,environment_state,"
+           "environment_relative_lambda_0";
+    const auto write_block_header = [&](const std::string &prefix)
+    {
+      casr_csv_stream_
+          << ',' << prefix << "available"
+          << ',' << prefix << "valid"
+          << ',' << prefix << "support_valid"
+          << ',' << prefix << "support_state"
+          << ',' << prefix << "support_quality_min"
+          << ',' << prefix << "support_pose_mode_num"
+          << ',' << prefix << "cause"
+          << ',' << prefix << "route_code"
+          << ',' << prefix << "route"
+          << ',' << prefix << "environment_rank"
+          << ',' << prefix << "support_rank"
+          << ',' << prefix << "common_rank"
+          << ',' << prefix << "recovery_rank"
+          << ',' << prefix << "overlap_score"
+          << ',' << prefix << "principal_cosine_min"
+          << ',' << prefix << "principal_cosine_max"
+          << ',' << prefix << "environment_exclusive_ratio"
+          << ',' << prefix << "support_exclusive_ratio";
+      for (int i = 0; i < 6; ++i)
+      {
+        casr_csv_stream_ << ',' << prefix
+                         << "support_pose_eigenvalue_" << i;
+      }
+      for (int row = 0; row < 6; ++row)
+      {
+        for (int col = row; col < 6; ++col)
+        {
+          casr_csv_stream_ << ',' << prefix << "recovery_p" << row << col;
+        }
+      }
+    };
+    write_block_header("real_");
+    write_block_header("injected_");
+    casr_csv_stream_ << '\n';
+    casr_csv_stream_.flush();
+  }
+
+  void ObservabilityAnalyzer::WriteCasrCsvRow(
+      int64_t scan_timestamp_ns,
+      const ObservabilityResult &original_result,
+      const CasrShadowResult &real_result,
+      const CasrShadowResult *injected_result)
+  {
+    if (!casr_csv_stream_.is_open())
+    {
+      return;
+    }
+
+    casr_csv_stream_
+        << std::setprecision(12)
+        << scan_timestamp_ns * Trajectory::NS_TO_S << ','
+        << static_cast<int>(original_result.valid) << ','
+        << static_cast<int>(original_result.degenerate_state) << ','
+        << original_result.relative_eigenvalues[0];
+
+    const auto write_block = [&](bool available,
+                                 const ObservabilityResult &support_result,
+                                 const CasrShadowResult &casr_result)
+    {
+      casr_csv_stream_
+          << ',' << static_cast<int>(available)
+          << ',' << static_cast<int>(casr_result.valid)
+          << ',' << static_cast<int>(support_result.support_valid)
+          << ',' << static_cast<int>(
+                         support_result.support_degenerate_state)
+          << ',' << support_result.support_quality_min
+          << ',' << support_result.support_pose_mode_num
+          << ',' << casr_result.cause
+          << ',' << static_cast<int>(casr_result.route)
+          << ',' << (available ? CasrRouteName(casr_result.route)
+                              : "not_available")
+          << ',' << casr_result.environment_rank
+          << ',' << casr_result.support_rank
+          << ',' << casr_result.common_rank
+          << ',' << casr_result.recovery_rank
+          << ',' << casr_result.overlap_score
+          << ',' << casr_result.principal_cosine_min
+          << ',' << casr_result.principal_cosine_max
+          << ',' << casr_result.environment_exclusive_ratio
+          << ',' << casr_result.support_exclusive_ratio;
+      for (int i = 0; i < 6; ++i)
+      {
+        casr_csv_stream_ << ','
+                         << casr_result.support_pose_eigenvalues[i];
+      }
+      for (int row = 0; row < 6; ++row)
+      {
+        for (int col = row; col < 6; ++col)
+        {
+          casr_csv_stream_ << ','
+                           << casr_result.recovery_projector(row, col);
+        }
+      }
+    };
+
+    write_block(true, original_result, real_result);
+    const ObservabilityResult empty_support;
+    const CasrShadowResult empty_casr;
+    if (injected_result)
+    {
+      write_block(true, last_injection_result_.injected_support,
+                  *injected_result);
+    }
+    else
+    {
+      write_block(false, empty_support, empty_casr);
+    }
+    casr_csv_stream_ << '\n';
+    casr_csv_stream_.flush();
+  }
+
   void ObservabilityAnalyzer::PrintSummary(
       const ObservabilityResult &result) const
   {
@@ -1126,6 +1387,30 @@ namespace cocolic
                 << " | injected_cause="
                 << DegeneracyCauseName(
                        last_injection_result_.degeneracy_cause);
+    }
+    if (casr_shadow_enabled_)
+    {
+      std::cout << " | casr_route="
+                << CasrRouteName(last_casr_result_.route)
+                << " | casr_rank(e/s/c/r)="
+                << last_casr_result_.environment_rank << "/"
+                << last_casr_result_.support_rank << "/"
+                << last_casr_result_.common_rank << "/"
+                << last_casr_result_.recovery_rank
+                << " | casr_overlap="
+                << last_casr_result_.overlap_score;
+      if (support_injection_enabled_)
+      {
+        std::cout << " | injected_casr_route="
+                  << CasrRouteName(last_injected_casr_result_.route)
+                  << " | injected_casr_rank(e/s/c/r)="
+                  << last_injected_casr_result_.environment_rank << "/"
+                  << last_injected_casr_result_.support_rank << "/"
+                  << last_injected_casr_result_.common_rank << "/"
+                  << last_injected_casr_result_.recovery_rank
+                  << " | injected_casr_overlap="
+                  << last_injected_casr_result_.overlap_score;
+      }
     }
     std::cout << std::endl;
   }
