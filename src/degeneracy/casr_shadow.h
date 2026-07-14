@@ -17,6 +17,9 @@
 namespace cocolic
 {
 
+  inline constexpr char kCasrShadowMethodVersion[] =
+      "knot_space_v2_overlap";
+
   using CasrVector6 = Eigen::Matrix<double, 6, 1>;
   using CasrMatrix6 = Eigen::Matrix<double, 6, 6>;
 
@@ -80,6 +83,7 @@ namespace cocolic
     CasrRoute stable_route = CasrRoute::Invalid;
     int route_candidate_count = 0;
     double temporal_projector_similarity = 0.0;
+    int temporal_overlap_control_point_num = 0;
     int projector_consistency_count = 0;
     bool recovery_ready = false;
 

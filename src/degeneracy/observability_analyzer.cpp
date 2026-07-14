@@ -291,7 +291,7 @@ namespace cocolic
     if (casr_shadow_enabled_)
     {
       const CasrShadowConfig &config = casr_shadow_evaluator_.Config();
-      std::cout << "(knot_space_v2,principal_cos="
+      std::cout << "(" << kCasrShadowMethodVersion << ",principal_cos="
                 << config.principal_cosine_threshold
                 << ",route_persistence="
                 << config.route_consecutive_scans
@@ -1474,6 +1474,7 @@ namespace cocolic
           << ',' << prefix << "stable_route"
           << ',' << prefix << "route_candidate_count"
           << ',' << prefix << "temporal_projector_similarity"
+          << ',' << prefix << "temporal_overlap_control_point_num"
           << ',' << prefix << "projector_consistency_count"
           << ',' << prefix << "recovery_ready";
     };
@@ -1540,7 +1541,7 @@ namespace cocolic
         }
       }
       casr_csv_stream_
-          << ",knot_space_v2"
+          << ',' << kCasrShadowMethodVersion
           << ',' << casr_result.support_control_point_start_index
           << ',' << casr_result.support_knot_dimension
           << ',' << casr_result.representative_pose_rank
@@ -1552,6 +1553,7 @@ namespace cocolic
                          : "not_available")
           << ',' << casr_result.route_candidate_count
           << ',' << casr_result.temporal_projector_similarity
+          << ',' << casr_result.temporal_overlap_control_point_num
           << ',' << casr_result.projector_consistency_count
           << ',' << static_cast<int>(casr_result.recovery_ready);
     };

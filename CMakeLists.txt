@@ -135,3 +135,13 @@ target_link_libraries(odometry_node
    ${thirdparty_libraries}
   #  fmt::fmt
 )
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(casr_shadow_test
+    test/casr_shadow_test.cpp
+    src/degeneracy/casr_shadow.cpp
+  )
+  if(TARGET casr_shadow_test)
+    target_link_libraries(casr_shadow_test ${catkin_LIBRARIES})
+  endif()
+endif()

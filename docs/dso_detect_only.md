@@ -309,12 +309,23 @@ used for routing.
 
 CASR-v2 also adds an independent temporal gate. `stable_route` changes only
 after `route_consecutive_scans` identical raw candidates. Candidate continuity
-is measured after aligning overlapping **global knot indices**:
+is measured after aligning overlapping **global knot indices**. Each basis is
+first restricted to the common control points and re-orthonormalized there.
+This removes artificial energy loss caused only by a rolling spline window
+dropping one boundary knot:
 
 ```text
-similarity = ||U_previous^T U_current||_F^2 /
-             max(rank_previous, rank_current).
+U_previous_overlap = orth(restrict(U_previous, common_knots))
+U_current_overlap  = orth(restrict(U_current, common_knots))
+similarity = ||U_previous_overlap^T U_current_overlap||_F^2 /
+             max(rank_previous_overlap, rank_current_overlap).
 ```
+
+The max-rank denominator still penalizes a genuine rank change in the overlap.
+`temporal_overlap_control_point_num` logs the size of the comparison window;
+it is zero for the first candidate after a route change because no previous
+basis exists. CSV `method_version` is `knot_space_v2_overlap` for this corrected
+temporal definition.
 
 `recovery_ready` becomes true only after the stable route matches the raw route
 and the similarity remains above `projector_similarity_threshold` for
@@ -332,9 +343,9 @@ Each row contains real and optional injected-copy blocks. In addition to the
 raw cause/route, ranks, principal cosines, overlap, exclusive ratios and the
 representative 6DoF matrix, the v2 block records `method_version`, active knot
 start/dimension, lift residual, basis orthogonality error, stable route,
-pending-route count, temporal similarity, consistency count, and
-`recovery_ready`. The original 81-column observability CSV and 45-column
-injection CSV remain unchanged.
+pending-route count, temporal similarity, temporal overlap size, consistency
+count, and `recovery_ready`. The original 81-column observability CSV and
+45-column injection CSV remain unchanged.
 
 `CASR-Shadow` still does not modify Ceres, the spline, measurements, the map,
 or the marginalization prior. A configuration with `shadow_only: false` is
@@ -394,7 +405,9 @@ check that support-only frames select `support_candidate`, coupled frames
 select `coupled_common_candidate` or the explicit conflict route, every
 knot basis is orthonormal within numerical tolerance, environment-lift
 residuals remain finite, the stable route suppresses isolated raw-route
-flips, and `recovery_ready` is never asserted during an unstable transition.
+flips, consecutive candidates report a nonzero temporal overlap, stable
+environment segments can reach `recovery_ready`, and `recovery_ready` is never
+asserted during an unstable transition.
 Use at least five repeated detector-OFF and shadow-ON runs to report ATE/RPE
 mean and standard deviation; two extrema alone are not a non-interference
 test. This still does not validate recovery accuracy. Estimator intervention

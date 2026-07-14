@@ -260,8 +260,13 @@ namespace cocolic
     double KnotSubspaceSimilarity(const DynamicBasis &first,
                                   int first_start_index,
                                   const DynamicBasis &second,
-                                  int second_start_index)
+                                  int second_start_index,
+                                  int *overlap_control_point_num)
     {
+      if (overlap_control_point_num)
+      {
+        *overlap_control_point_num = 0;
+      }
       if (first.rows() % 6 != 0 || second.rows() % 6 != 0 ||
           first.cols() == 0 || second.cols() == 0 ||
           first_start_index < 0 || second_start_index < 0)
@@ -281,19 +286,45 @@ namespace cocolic
         return 0.0;
       }
 
-      Eigen::MatrixXd cross =
-          Eigen::MatrixXd::Zero(first.cols(), second.cols());
+      const int overlap_control_points = overlap_end - overlap_start;
+      if (overlap_control_point_num)
+      {
+        *overlap_control_point_num = overlap_control_points;
+      }
+      DynamicBasis first_overlap(6 * overlap_control_points, first.cols());
+      DynamicBasis second_overlap(6 * overlap_control_points,
+                                  second.cols());
       for (int global_index = overlap_start;
            global_index < overlap_end; ++global_index)
       {
+        const int overlap_local = global_index - overlap_start;
         const int first_local = global_index - first_start_index;
         const int second_local = global_index - second_start_index;
-        cross.noalias() +=
-            first.block(6 * first_local, 0, 6, first.cols()).transpose() *
+        first_overlap.block(6 * overlap_local, 0, 6, first.cols()) =
+            first.block(6 * first_local, 0, 6, first.cols());
+        second_overlap.block(6 * overlap_local, 0, 6, second.cols()) =
             second.block(6 * second_local, 0, 6, second.cols());
       }
+
+      // The active spline window normally advances by one control point per
+      // scan. Re-orthonormalize both restrictions before comparing them so
+      // that energy carried by non-overlapping boundary knots does not create
+      // an artificial similarity loss. The max-rank denominator still
+      // penalizes a genuine rank change inside the common global-knot window.
+      const DynamicBasis first_local_basis =
+          OrthonormalBasis(first_overlap, 1e-8);
+      const DynamicBasis second_local_basis =
+          OrthonormalBasis(second_overlap, 1e-8);
+      if (first_local_basis.cols() == 0 ||
+          second_local_basis.cols() == 0)
+      {
+        return 0.0;
+      }
+
+      const Eigen::MatrixXd cross =
+          first_local_basis.transpose() * second_local_basis;
       const double normalizer = static_cast<double>(
-          std::max(first.cols(), second.cols()));
+          std::max(first_local_basis.cols(), second_local_basis.cols()));
       return std::max(0.0, std::min(1.0,
                                    cross.squaredNorm() / normalizer));
     }
@@ -371,7 +402,8 @@ namespace cocolic
               state->previous_recovery_basis,
               state->previous_control_point_start_index,
               result.recovery_knot_basis,
-              result.support_control_point_start_index);
+              result.support_control_point_start_index,
+              &result.temporal_overlap_control_point_num);
           if (result.temporal_projector_similarity >=
               config.projector_similarity_threshold)
           {
