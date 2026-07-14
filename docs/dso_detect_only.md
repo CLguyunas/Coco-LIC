@@ -186,7 +186,8 @@ config/data/degenerate_seq_02_dso_support_injection.csv
 The main `*_dso_observability.csv` keeps its existing 81 columns and its real
 `degeneracy_cause`. The injection CSV records both original and injected
 support metrics, sample counts, retained/time-span ratios, injected hysteresis,
-and `injected_degeneracy_cause`. The injected cause combines the **real**
+the number of preserved boundary anchors, and `injected_degeneracy_cause`.
+The injected cause combines the **real**
 environment state with the **injected-copy** support state:
 
 | Real environment | Injected support | Injected cause |
@@ -205,8 +206,10 @@ s_i = (t_i - t_min) / (t_max - t_min).
 This avoids hard-coding a bag timestamp, scan duration, LiDAR rate, or the
 `Tunneling_tunnel4_gamma` sequence. Available modes are:
 
-- `timestamp_compression`: move timestamps in `[phase_start, phase_end]`
-  toward the phase-window center; `severity=1` collapses them to the center;
+- `timestamp_compression`: preserve all earliest/latest timestamp samples as
+  boundary anchors, then move the remaining timestamps in
+  `[phase_start, phase_end]` toward the phase-window center; `severity=1`
+  collapses the selected non-anchor samples to the center;
 - `phase_dropout`: remove selected-window samples with probability `severity`;
 - `boundary_dropout`: remove samples outside the selected central window with
   probability `severity`;
@@ -216,6 +219,13 @@ This avoids hard-coding a bag timestamp, scan duration, LiDAR rate, or the
 Dropout uses a deterministic hash of the timestamp, sample index, and
 `random_seed`, so the same input and configuration produce the same diagnostic
 copy. No global random generator or estimator scheduling state is touched.
+
+The boundary anchors keep the original timestamp span and active
+control-point range fixed during compression. This prevents a compressed scan
+from accidentally landing on a smaller set of complete knot intervals and
+appearing healthy only because its reference dimension also shrank. For
+`timestamp_compression`, `timestamp_span_ratio` should therefore remain `1`,
+and `boundary_anchor_sample_num` should normally be at least `2`.
 
 The implementation is sequence-independent, but empirical generalization must
 still be demonstrated. Use fixed phase parameters and seeds on multiple bags,
@@ -260,12 +270,14 @@ and severities `0.0, 0.25, 0.5, 0.75, 1.0`. For every run preserve both CSVs
 and the trajectory. A valid harness should show:
 
 1. severity 0 reproduces the original support metrics up to numerical error;
-2. increasing compression reduces `injected_support_quality_min` in affected
+2. anchored compression keeps `timestamp_span_ratio == 1`, reports at least
+   two boundary anchors, and preserves the original active control-point range;
+3. increasing compression reduces `injected_support_quality_min` in affected
    scans without changing `original_support_quality_min`;
-3. the real environment fields are identical in definition and see no injected
+4. the real environment fields are identical in definition and see no injected
    timestamps;
-4. `enabled: false` creates no injection CSV and preserves the previous path;
-5. ON/OFF trajectory differences remain within repeated-run scheduling noise.
+5. `enabled: false` creates no injection CSV and preserves the previous path;
+6. ON/OFF trajectory differences remain within repeated-run scheduling noise.
 
 Together, an original run and an injected run provide the four cause cases
 needed to test the future cause-adaptive CASR router. They do not yet validate

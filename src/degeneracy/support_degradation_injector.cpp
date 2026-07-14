@@ -106,13 +106,24 @@ namespace cocolic
           (static_cast<uint64_t>(index) * 0xbf58476d1ce4e5b9ULL);
       const bool selected_by_severity =
           UnitRandom(random_key) < config_.severity;
+      const bool is_boundary_anchor =
+          sample.first == min_timestamp_ns ||
+          sample.first == max_timestamp_ns;
 
       bool remove_sample = false;
       WeightedTimestamp injected_sample = sample;
       switch (config_.mode)
       {
       case SupportInjectionMode::TimestampCompression:
-        if (inside_selected_phase)
+        if (is_boundary_anchor)
+        {
+          // Preserve the original active knot/control-point range. Without
+          // these anchors, a compressed scan can accidentally cover a smaller
+          // integer number of complete knot intervals and look uniformly
+          // supported relative to that reduced range.
+          ++metadata.boundary_anchor_sample_num;
+        }
+        else if (inside_selected_phase)
         {
           ++metadata.selected_sample_num;
           const double injected_phase =

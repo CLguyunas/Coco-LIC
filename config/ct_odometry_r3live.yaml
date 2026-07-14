@@ -80,7 +80,9 @@ dso_detect_only:
         mode: timestamp_compression
         severity: 0.5
         # Normalized within-scan phase, independent of bag duration/sensor Hz.
-        # Use 0.0/1.0 for compression; 0.2/0.8 is a useful dropout window.
+        # Compression automatically preserves the earliest/latest timestamps
+        # as boundary anchors. Use 0.0/1.0 for compression; 0.2/0.8 is a
+        # useful dropout window.
         phase_start: 0.0
         phase_end: 1.0
         random_seed: 42

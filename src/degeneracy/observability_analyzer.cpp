@@ -1004,7 +1004,8 @@ namespace cocolic
     injection_csv_stream_
         << "scan_timestamp_s,injection_mode_code,injection_mode,"
            "injection_severity,phase_start,phase_end,random_seed,"
-           "injection_applied,input_sample_num,selected_sample_num,"
+           "injection_applied,input_sample_num,boundary_anchor_sample_num,"
+           "selected_sample_num,"
            "modified_sample_num,removed_sample_num,output_sample_num,"
            "retained_ratio,timestamp_span_ratio,environment_valid,"
            "environment_relative_lambda_0,environment_score,"
@@ -1049,7 +1050,9 @@ namespace cocolic
         << metadata.severity << ',' << metadata.phase_start << ','
         << metadata.phase_end << ',' << metadata.random_seed << ','
         << static_cast<int>(metadata.applied) << ','
-        << metadata.input_sample_num << ',' << metadata.selected_sample_num
+        << metadata.input_sample_num << ','
+        << metadata.boundary_anchor_sample_num << ','
+        << metadata.selected_sample_num
         << ',' << metadata.modified_sample_num << ','
         << metadata.removed_sample_num << ',' << metadata.output_sample_num
         << ',' << metadata.retained_ratio << ','
@@ -1115,6 +1118,8 @@ namespace cocolic
       std::cout << " | injection="
                 << SupportDegradationInjector::ModeName(
                        last_injection_result_.metadata.mode)
+                << " | anchors="
+                << last_injection_result_.metadata.boundary_anchor_sample_num
                 << " | injected_q=" << injected.support_quality_min
                 << " | injected_support_state="
                 << static_cast<int>(injected.support_degenerate_state)

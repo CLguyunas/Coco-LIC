@@ -47,6 +47,8 @@ namespace cocolic
     double phase_end = 1.0;
     uint64_t random_seed = 0;
     size_t input_sample_num = 0;
+    // Exact earliest/latest samples preserved by timestamp compression.
+    size_t boundary_anchor_sample_num = 0;
     size_t selected_sample_num = 0;
     size_t modified_sample_num = 0;
     size_t removed_sample_num = 0;
