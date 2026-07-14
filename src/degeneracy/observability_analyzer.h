@@ -73,13 +73,17 @@ namespace cocolic
     double support_weakest_rotation_ratio = 0.0;
     double support_boundary_energy_ratio = 0.0;
 
-    // Internal CASR bridge. Weak generalized knot modes are folded into the
-    // common scaled 6DoF order [r * dtheta, dt] by accumulating each active
-    // knot block's outer product. These fields are kept out of the legacy
-    // observability CSV and are consumed only by the shadow evaluator.
-    int support_pose_mode_num = 0;
-    Eigen::Matrix<double, 6, 6> support_pose_weakness =
-        Eigen::Matrix<double, 6, 6>::Zero();
+    // Internal CASR-v2 bridge. Weak generalized modes remain in the active 6K
+    // control-point space instead of being folded into a 6DoF outer product.
+    // The reference matrices define the scan-wide least-squares lift from a
+    // map-frame LiDAR pose direction to the same scaled knot coordinates.
+    // These dynamic fields are kept out of the legacy observability CSV.
+    int support_control_point_start_index = -1;
+    int support_knot_mode_num = 0;
+    Eigen::MatrixXd support_knot_weak_basis;
+    Eigen::MatrixXd support_reference_pose_information;
+    Eigen::MatrixXd support_reference_pose_cross;
+    Eigen::MatrixXd support_representative_pose_mapping;
 
     // -1 invalid, 0 healthy, 1 environment geometry, 2 spline support,
     // 3 coupled environment-and-support degeneracy. This is diagnostic only.
@@ -165,7 +169,8 @@ namespace cocolic
 
     CasrShadowResult AnalyzeCasr(
         const ObservabilityResult &environment_result,
-        const ObservabilityResult &support_result) const;
+        const ObservabilityResult &support_result,
+        CasrTemporalState *temporal_state) const;
 
     void WriteCsvHeader();
     void WriteCsvRow(const ObservabilityResult &result);
@@ -214,6 +219,8 @@ namespace cocolic
     bool casr_shadow_enabled_ = false;
     bool casr_shadow_output_csv_ = true;
     CasrShadowEvaluator casr_shadow_evaluator_;
+    CasrTemporalState real_casr_temporal_state_;
+    CasrTemporalState injected_casr_temporal_state_;
 
     size_t scan_counter_ = 0;
     std::string csv_path_;

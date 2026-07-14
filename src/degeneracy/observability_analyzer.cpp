@@ -8,6 +8,7 @@
 #include <utils/sophus_utils.hpp>
 
 #include <Eigen/Eigenvalues>
+#include <Eigen/SVD>
 
 #include <algorithm>
 #include <array>
@@ -150,10 +151,20 @@ namespace cocolic
     casr_config.environment_relative_threshold = ReadValue<double>(
         casr_node, "environment_relative_threshold",
         exit_relative_eigenvalue_threshold_);
-    casr_config.support_pose_relative_threshold = ReadValue<double>(
-        casr_node, "support_pose_relative_threshold", 1e-1);
+    casr_config.support_basis_relative_singular_threshold =
+        ReadValue<double>(casr_node,
+                          "support_basis_relative_singular_threshold",
+                          1e-6);
+    casr_config.lift_regularization = ReadValue<double>(
+        casr_node, "lift_regularization", 1e-6);
     casr_config.principal_cosine_threshold = ReadValue<double>(
         casr_node, "principal_cosine_threshold", 7e-1);
+    casr_config.route_consecutive_scans = ReadValue<int>(
+        casr_node, "route_consecutive_scans", 3);
+    casr_config.projector_consecutive_scans = ReadValue<int>(
+        casr_node, "projector_consecutive_scans", 3);
+    casr_config.projector_similarity_threshold = ReadValue<double>(
+        casr_node, "projector_similarity_threshold", 8e-1);
     casr_shadow_evaluator_.Configure(casr_config);
     casr_shadow_enabled_ = casr_shadow_evaluator_.Enabled();
 
@@ -196,6 +207,14 @@ namespace cocolic
     {
       std::cerr << "[CASR-Shadow] disabled because support_enabled is "
                    "false.\n";
+    }
+    if (casr_requested && casr_node["support_pose_relative_threshold"] &&
+        !casr_node["support_basis_relative_singular_threshold"])
+    {
+      std::cerr
+          << "[CASR-Shadow] support_pose_relative_threshold belongs to "
+             "CASR-v1 and is ignored. CASR-v2 uses the default "
+             "support_basis_relative_singular_threshold=1e-6.\n";
     }
 
     csv_path_ = output_prefix + "_dso_observability.csv";
@@ -256,8 +275,7 @@ namespace cocolic
               << " | support_enter/exit="
               << support_enter_quality_threshold_ << "/"
               << support_exit_quality_threshold_
-              << " | support_injection=" << support_injection_enabled_
-              << " | casr_shadow=" << casr_shadow_enabled_;
+              << " | support_injection=" << support_injection_enabled_;
     if (support_injection_enabled_)
     {
       const SupportInjectionConfig &config = support_injector_.Config();
@@ -268,6 +286,19 @@ namespace cocolic
                 << (injection_csv_stream_.is_open()
                         ? injection_csv_path_
                         : std::string("disabled"));
+    }
+    std::cout << " | casr_shadow=" << casr_shadow_enabled_;
+    if (casr_shadow_enabled_)
+    {
+      const CasrShadowConfig &config = casr_shadow_evaluator_.Config();
+      std::cout << "(knot_space_v2,principal_cos="
+                << config.principal_cosine_threshold
+                << ",route_persistence="
+                << config.route_consecutive_scans
+                << ",projector_persistence="
+                << config.projector_consecutive_scans
+                << ",projector_similarity="
+                << config.projector_similarity_threshold << ")";
     }
     std::cout << " | csv="
               << (csv_stream_.is_open() ? csv_path_ : std::string("disabled"))
@@ -362,13 +393,15 @@ namespace cocolic
 
     if (casr_shadow_enabled_)
     {
-      last_casr_result_ = AnalyzeCasr(last_result_, last_result_);
+      last_casr_result_ = AnalyzeCasr(
+          last_result_, last_result_, &real_casr_temporal_state_);
       last_injected_casr_result_ = CasrShadowResult();
       const CasrShadowResult *injected_casr = nullptr;
       if (support_injection_enabled_)
       {
         last_injected_casr_result_ = AnalyzeCasr(
-            last_result_, last_injection_result_.injected_support);
+            last_result_, last_injection_result_.injected_support,
+            &injected_casr_temporal_state_);
         injected_casr = &last_injected_casr_result_;
       }
       WriteCasrCsvRow(scan_timestamp_ns, last_result_, last_casr_result_,
@@ -684,14 +717,25 @@ namespace cocolic
         Eigen::MatrixXd::Zero(dimension, dimension);
     Eigen::MatrixXd reference_information =
         Eigen::MatrixXd::Zero(dimension, dimension);
+    Eigen::MatrixXd reference_pose_information =
+        Eigen::MatrixXd::Zero(dimension, dimension);
+    Eigen::MatrixXd reference_pose_cross =
+        Eigen::MatrixXd::Zero(dimension, 6);
 
     using SO3View = analytic_derivative::So3SplineView;
-    const auto accumulate_mapping =
+    using LocalMapping =
+        Eigen::Matrix<double, 6, 6 * SplineOrder>;
+    const Eigen::Vector3d lidar_position_in_imu =
+        trajectory_->GetSensorEP(LiDARSensor).p;
+    const double characteristic_range =
+        std::max(result.characteristic_range, 1e-3);
+
+    const auto build_local_mappings =
         [&](int interval_index, int control_start_index, double u,
-            double sample_weight, Eigen::MatrixXd &information) -> bool
+            LocalMapping &support_mapping,
+            LocalMapping &pose_mapping) -> bool
     {
-      if (!std::isfinite(u) || u < 0.0 || u > 1.0 ||
-          !std::isfinite(sample_weight) || sample_weight <= 0.0)
+      if (!std::isfinite(u) || u < 0.0 || u > 1.0)
       {
         return false;
       }
@@ -706,7 +750,7 @@ namespace cocolic
       }
 
       typename SO3View::JacobianStruct rotation_jacobian;
-      SO3View::EvaluateRpNURBS(
+      const SO3d imu_rotation = SO3View::EvaluateRpNURBS(
           std::make_pair(interval_index, u),
           trajectory_->cumu_blending_mats[
               static_cast<size_t>(control_start_index)],
@@ -723,30 +767,89 @@ namespace cocolic
         return false;
       }
 
+      support_mapping.setZero();
+      pose_mapping.setZero();
       const Eigen::Matrix3d identity = Eigen::Matrix3d::Identity();
+      const Eigen::Matrix3d rotation_matrix = imu_rotation.matrix();
+      const Eigen::Matrix3d lever_arm_mapping =
+          -rotation_matrix * SO3d::hat(lidar_position_in_imu) /
+          characteristic_range;
       for (int i = 0; i < SplineOrder; ++i)
       {
-        if (!rotation_jacobian.d_val_d_knot[static_cast<size_t>(i)]
-                 .allFinite())
+        const Eigen::Matrix3d &rotation_knot_jacobian =
+            rotation_jacobian.d_val_d_knot[static_cast<size_t>(i)];
+        if (!rotation_knot_jacobian.allFinite())
         {
           return false;
         }
+
+        const int offset = 6 * i;
+        support_mapping.block<3, 3>(0, offset) =
+            rotation_knot_jacobian;
+        support_mapping.block<3, 3>(3, offset + 3) =
+            position_coefficients[i] * identity;
+
+        // The environment detector uses a map-frame left perturbation of the
+        // LiDAR pose. NURBS rotation knots use right perturbations of the IMU
+        // attitude, hence R_I*J_i. The lower-left block is the exact LiDAR
+        // lever-arm translation induced by the scaled rotation knot.
+        pose_mapping.block<3, 3>(0, offset) =
+            rotation_matrix * rotation_knot_jacobian;
+        pose_mapping.block<3, 3>(3, offset) =
+            lever_arm_mapping * rotation_knot_jacobian;
+        pose_mapping.block<3, 3>(3, offset + 3) =
+            position_coefficients[i] * identity;
+      }
+      return support_mapping.allFinite() && pose_mapping.allFinite();
+    };
+
+    const auto accumulate_mapping =
+        [&](int interval_index, int control_start_index, double u,
+            double sample_weight, Eigen::MatrixXd &information,
+            Eigen::MatrixXd *pose_information,
+            Eigen::MatrixXd *pose_cross) -> bool
+    {
+      if (!std::isfinite(u) || u < 0.0 || u > 1.0 ||
+          !std::isfinite(sample_weight) || sample_weight <= 0.0)
+      {
+        return false;
+      }
+
+      LocalMapping support_mapping;
+      LocalMapping local_pose_mapping;
+      if (!build_local_mappings(interval_index, control_start_index, u,
+                                support_mapping, local_pose_mapping))
+      {
+        return false;
+      }
+
+      for (int i = 0; i < SplineOrder; ++i)
+      {
         const int local_i = control_start_index + i - min_control_index;
-        const int rotation_i = 6 * local_i;
-        const int position_i = rotation_i + 3;
+        const int global_i = 6 * local_i;
+        const int mapping_i = 6 * i;
+        if (pose_cross)
+        {
+          pose_cross->block(global_i, 0, 6, 6).noalias() +=
+              sample_weight *
+              local_pose_mapping.block(0, mapping_i, 6, 6).transpose();
+        }
         for (int j = 0; j < SplineOrder; ++j)
         {
           const int local_j = control_start_index + j - min_control_index;
-          const int rotation_j = 6 * local_j;
-          const int position_j = rotation_j + 3;
-          information.block<3, 3>(rotation_i, rotation_j).noalias() +=
+          const int global_j = 6 * local_j;
+          const int mapping_j = 6 * j;
+          information.block(global_i, global_j, 6, 6).noalias() +=
               sample_weight *
-              rotation_jacobian.d_val_d_knot[static_cast<size_t>(i)]
-                  .transpose() *
-              rotation_jacobian.d_val_d_knot[static_cast<size_t>(j)];
-          information.block<3, 3>(position_i, position_j) +=
-              sample_weight * position_coefficients[i] *
-              position_coefficients[j] * identity;
+              support_mapping.block(0, mapping_i, 6, 6).transpose() *
+              support_mapping.block(0, mapping_j, 6, 6);
+          if (pose_information)
+          {
+            pose_information->block(global_i, global_j, 6, 6).noalias() +=
+                sample_weight *
+                local_pose_mapping.block(0, mapping_i, 6, 6).transpose() *
+                local_pose_mapping.block(0, mapping_j, 6, 6);
+          }
         }
       }
       return true;
@@ -757,7 +860,8 @@ namespace cocolic
     {
       if (accumulate_mapping(sample.interval_index,
                              sample.control_start_index, sample.u,
-                             sample.squared_weight, observed_information))
+                             sample.squared_weight, observed_information,
+                             nullptr, nullptr))
       {
         observed_weight_sum += sample.squared_weight;
       }
@@ -802,7 +906,9 @@ namespace cocolic
             static_cast<double>(support_reference_samples_per_interval_);
         if (accumulate_mapping(interval_index, control_start_index, u,
                                reference_sample_weight,
-                               reference_information))
+                               reference_information,
+                               &reference_pose_information,
+                               &reference_pose_cross))
         {
           reference_weight_sum += reference_sample_weight;
         }
@@ -817,10 +923,68 @@ namespace cocolic
 
     observed_information /= observed_weight_sum;
     reference_information /= reference_weight_sum;
+    reference_pose_information /= reference_weight_sum;
+    reference_pose_cross /= reference_weight_sum;
     observed_information =
         0.5 * (observed_information + observed_information.transpose());
     reference_information =
         0.5 * (reference_information + reference_information.transpose());
+    reference_pose_information =
+        0.5 * (reference_pose_information +
+               reference_pose_information.transpose());
+
+    // A representative-time mapping is logged only as a compact 6DoF view of
+    // each knot-space candidate. It is not used for principal angles or route
+    // selection. The actual environment lift above uses all reference times.
+    Eigen::MatrixXd representative_pose_mapping =
+        Eigen::MatrixXd::Zero(6, dimension);
+    const int64_t representative_timestamp_ns =
+        min_timestamp_ns + (max_timestamp_ns - min_timestamp_ns) / 2;
+    const auto representative_upper = std::upper_bound(
+        knot_times.begin(), knot_times.end(), representative_timestamp_ns);
+    if (representative_upper == knot_times.begin() ||
+        representative_upper == knot_times.end())
+    {
+      return;
+    }
+    const int representative_interval_index =
+        static_cast<int>(
+            std::distance(knot_times.begin(), representative_upper)) -
+        1;
+    const int representative_control_start_index =
+        representative_interval_index - 3;
+    const int64_t representative_interval_ns =
+        knot_times[static_cast<size_t>(representative_interval_index + 1)] -
+        knot_times[static_cast<size_t>(representative_interval_index)];
+    if (representative_control_start_index < min_control_index ||
+        representative_control_start_index + SplineOrder - 1 >
+            max_control_index ||
+        representative_interval_ns <= 0)
+    {
+      return;
+    }
+    const double representative_u =
+        static_cast<double>(
+            representative_timestamp_ns -
+            knot_times[static_cast<size_t>(representative_interval_index)]) /
+        static_cast<double>(representative_interval_ns);
+    LocalMapping representative_support_mapping;
+    LocalMapping representative_local_pose_mapping;
+    if (!build_local_mappings(representative_interval_index,
+                              representative_control_start_index,
+                              representative_u,
+                              representative_support_mapping,
+                              representative_local_pose_mapping))
+    {
+      return;
+    }
+    for (int i = 0; i < SplineOrder; ++i)
+    {
+      const int local_index =
+          representative_control_start_index + i - min_control_index;
+      representative_pose_mapping.block(0, 6 * local_index, 6, 6) =
+          representative_local_pose_mapping.block(0, 6 * i, 6, 6);
+    }
 
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> reference_solver(
         reference_information);
@@ -909,16 +1073,16 @@ namespace cocolic
       }
     }
 
-    // Fold the candidate weak knot modes into the same scaled 6DoF state
-    // used by the environment eigensystem. A physical rotation perturbation
-    // dtheta corresponds to r*dtheta in that state because the environment
-    // rotation Jacobian columns were divided by characteristic_range.
-    // Accumulating per-knot 6DoF outer products preserves axis information
-    // without cancelling the alternating signs of temporal spline modes.
-    CasrMatrix6 support_pose_weakness = CasrMatrix6::Zero();
-    int support_pose_mode_num = 0;
-    const int candidate_pose_mode_num = std::max(1, weak_direction_num);
-    for (int mode_index = 0; mode_index < candidate_pose_mode_num;
+    // CASR-v2 keeps the weak generalized modes in the full active knot space.
+    // A physical rotation perturbation dtheta corresponds to r*dtheta in the
+    // environment detector's scaled state, so every rotation knot block is
+    // scaled by the same characteristic range before Euclidean
+    // orthonormalization. No per-knot outer-product folding is performed.
+    const int candidate_knot_mode_num = std::max(1, weak_direction_num);
+    Eigen::MatrixXd candidate_knot_modes =
+        Eigen::MatrixXd::Zero(dimension, candidate_knot_mode_num);
+    int accepted_knot_mode_num = 0;
+    for (int mode_index = 0; mode_index < candidate_knot_mode_num;
          ++mode_index)
     {
       Eigen::VectorXd scaled_mode =
@@ -926,35 +1090,49 @@ namespace cocolic
       for (int local_index = 0; local_index < control_point_num;
            ++local_index)
       {
-        scaled_mode.segment<3>(6 * local_index) *=
-            result.characteristic_range;
+        scaled_mode.segment<3>(6 * local_index) *= characteristic_range;
       }
       const double scaled_norm = scaled_mode.norm();
       if (!std::isfinite(scaled_norm) || scaled_norm <= 1e-12)
       {
         continue;
       }
-      scaled_mode /= scaled_norm;
-      for (int local_index = 0; local_index < control_point_num;
-           ++local_index)
+      candidate_knot_modes.col(accepted_knot_mode_num) =
+          scaled_mode / scaled_norm;
+      ++accepted_knot_mode_num;
+    }
+    if (accepted_knot_mode_num <= 0)
+    {
+      return;
+    }
+
+    Eigen::JacobiSVD<Eigen::MatrixXd> knot_mode_svd(
+        candidate_knot_modes.leftCols(accepted_knot_mode_num),
+        Eigen::ComputeThinU | Eigen::ComputeThinV);
+    const Eigen::VectorXd knot_mode_singular_values =
+        knot_mode_svd.singularValues();
+    if (knot_mode_singular_values.size() == 0 ||
+        !knot_mode_singular_values.allFinite() ||
+        knot_mode_singular_values[0] <= 1e-12)
+    {
+      return;
+    }
+    const double knot_mode_threshold =
+        std::max(1e-12, 1e-8 * knot_mode_singular_values[0]);
+    int support_knot_mode_num = 0;
+    for (int i = 0; i < knot_mode_singular_values.size(); ++i)
+    {
+      if (knot_mode_singular_values[i] >= knot_mode_threshold)
       {
-        const CasrVector6 knot_mode =
-            scaled_mode.segment<6>(6 * local_index);
-        support_pose_weakness.noalias() +=
-            knot_mode * knot_mode.transpose();
+        ++support_knot_mode_num;
       }
-      ++support_pose_mode_num;
     }
-    const double support_pose_trace = support_pose_weakness.trace();
-    if (std::isfinite(support_pose_trace) && support_pose_trace > 1e-12)
+    if (support_knot_mode_num <= 0)
     {
-      support_pose_weakness /= support_pose_trace;
+      return;
     }
-    else
-    {
-      support_pose_weakness.setZero();
-      support_pose_mode_num = 0;
-    }
+    const Eigen::MatrixXd support_knot_weak_basis =
+        knot_mode_svd.matrixU().leftCols(support_knot_mode_num);
 
     result.support_valid = true;
     result.support_control_point_num = control_point_num;
@@ -976,8 +1154,14 @@ namespace cocolic
         std::max(0.0, max_knot_energy);
     result.support_weakest_rotation_ratio = rotation_energy;
     result.support_boundary_energy_ratio = boundary_energy;
-    result.support_pose_mode_num = support_pose_mode_num;
-    result.support_pose_weakness = support_pose_weakness;
+    result.support_control_point_start_index = min_control_index;
+    result.support_knot_mode_num = support_knot_mode_num;
+    result.support_knot_weak_basis = support_knot_weak_basis;
+    result.support_reference_pose_information =
+        reference_pose_information;
+    result.support_reference_pose_cross = reference_pose_cross;
+    result.support_representative_pose_mapping =
+        representative_pose_mapping;
   }
 
   void ObservabilityAnalyzer::AnalyzeInjectedSupport(
@@ -1015,7 +1199,8 @@ namespace cocolic
 
   CasrShadowResult ObservabilityAnalyzer::AnalyzeCasr(
       const ObservabilityResult &environment_result,
-      const ObservabilityResult &support_result) const
+      const ObservabilityResult &support_result,
+      CasrTemporalState *temporal_state) const
   {
     CasrShadowInput input;
     input.environment_valid = environment_result.valid;
@@ -1025,8 +1210,17 @@ namespace cocolic
     input.environment_relative_eigenvalues =
         environment_result.relative_eigenvalues;
     input.environment_eigenvectors = environment_result.eigenvectors;
-    input.support_pose_weakness = support_result.support_pose_weakness;
-    return casr_shadow_evaluator_.Evaluate(input);
+    input.support_control_point_start_index =
+        support_result.support_control_point_start_index;
+    input.support_knot_weak_basis =
+        &support_result.support_knot_weak_basis;
+    input.reference_pose_information =
+        &support_result.support_reference_pose_information;
+    input.reference_pose_cross =
+        &support_result.support_reference_pose_cross;
+    input.representative_pose_mapping =
+        &support_result.support_representative_pose_mapping;
+    return casr_shadow_evaluator_.Evaluate(input, temporal_state);
   }
 
   void ObservabilityAnalyzer::WriteCsvHeader()
@@ -1244,7 +1438,7 @@ namespace cocolic
           << ',' << prefix << "support_valid"
           << ',' << prefix << "support_state"
           << ',' << prefix << "support_quality_min"
-          << ',' << prefix << "support_pose_mode_num"
+          << ',' << prefix << "support_knot_mode_num"
           << ',' << prefix << "cause"
           << ',' << prefix << "route_code"
           << ',' << prefix << "route"
@@ -1269,6 +1463,19 @@ namespace cocolic
           casr_csv_stream_ << ',' << prefix << "recovery_p" << row << col;
         }
       }
+      casr_csv_stream_
+          << ',' << prefix << "method_version"
+          << ',' << prefix << "support_control_point_start_index"
+          << ',' << prefix << "support_knot_dimension"
+          << ',' << prefix << "representative_pose_rank"
+          << ',' << prefix << "environment_lift_residual"
+          << ',' << prefix << "recovery_basis_orthogonality_error"
+          << ',' << prefix << "stable_route_code"
+          << ',' << prefix << "stable_route"
+          << ',' << prefix << "route_candidate_count"
+          << ',' << prefix << "temporal_projector_similarity"
+          << ',' << prefix << "projector_consistency_count"
+          << ',' << prefix << "recovery_ready";
     };
     write_block_header("real_");
     write_block_header("injected_");
@@ -1305,7 +1512,7 @@ namespace cocolic
           << ',' << static_cast<int>(
                          support_result.support_degenerate_state)
           << ',' << support_result.support_quality_min
-          << ',' << support_result.support_pose_mode_num
+          << ',' << support_result.support_knot_mode_num
           << ',' << casr_result.cause
           << ',' << static_cast<int>(casr_result.route)
           << ',' << (available ? CasrRouteName(casr_result.route)
@@ -1332,6 +1539,21 @@ namespace cocolic
                            << casr_result.recovery_projector(row, col);
         }
       }
+      casr_csv_stream_
+          << ",knot_space_v2"
+          << ',' << casr_result.support_control_point_start_index
+          << ',' << casr_result.support_knot_dimension
+          << ',' << casr_result.representative_pose_rank
+          << ',' << casr_result.environment_lift_residual
+          << ',' << casr_result.recovery_basis_orthogonality_error
+          << ',' << static_cast<int>(casr_result.stable_route)
+          << ',' << (available
+                         ? CasrRouteName(casr_result.stable_route)
+                         : "not_available")
+          << ',' << casr_result.route_candidate_count
+          << ',' << casr_result.temporal_projector_similarity
+          << ',' << casr_result.projector_consistency_count
+          << ',' << static_cast<int>(casr_result.recovery_ready);
     };
 
     write_block(true, original_result, real_result);
@@ -1398,7 +1620,13 @@ namespace cocolic
                 << last_casr_result_.common_rank << "/"
                 << last_casr_result_.recovery_rank
                 << " | casr_overlap="
-                << last_casr_result_.overlap_score;
+                << last_casr_result_.overlap_score
+                << " | casr_stable="
+                << CasrRouteName(last_casr_result_.stable_route)
+                << " | casr_ready="
+                << static_cast<int>(last_casr_result_.recovery_ready)
+                << " | casr_temporal_similarity="
+                << last_casr_result_.temporal_projector_similarity;
       if (support_injection_enabled_)
       {
         std::cout << " | injected_casr_route="
@@ -1409,7 +1637,16 @@ namespace cocolic
                   << last_injected_casr_result_.common_rank << "/"
                   << last_injected_casr_result_.recovery_rank
                   << " | injected_casr_overlap="
-                  << last_injected_casr_result_.overlap_score;
+                  << last_injected_casr_result_.overlap_score
+                  << " | injected_casr_stable="
+                  << CasrRouteName(
+                         last_injected_casr_result_.stable_route)
+                  << " | injected_casr_ready="
+                  << static_cast<int>(
+                         last_injected_casr_result_.recovery_ready)
+                  << " | injected_casr_temporal_similarity="
+                  << last_injected_casr_result_
+                         .temporal_projector_similarity;
       }
     }
     std::cout << std::endl;

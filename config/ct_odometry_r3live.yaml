@@ -86,9 +86,11 @@ dso_detect_only:
         phase_start: 0.0
         phase_end: 1.0
         random_seed: 42
-    # Stage 3: cause-adaptive subspace recovery in shadow mode. It constructs
-    # and logs candidate 6DoF projectors but does not add a prior or change any
-    # estimator residual. A false shadow_only value is refused by the code.
+    # Stage 3: cause-adaptive subspace recovery in shadow mode. CASR-v2 keeps
+    # support modes in the active 6K knot space and lifts map-frame environment
+    # directions into that same space over the full scan. It does not add a
+    # prior or change any estimator residual. A false shadow_only value is
+    # refused by the code.
     casr_shadow:
         enabled: true
         shadow_only: true
@@ -96,10 +98,19 @@ dso_detect_only:
         # Environment directions inside the hysteresis exit band remain
         # eligible while the persistent environment state is active.
         environment_relative_threshold: 6.0e-3
-        # Retain support-pose axes whose energy is at least 10% of the largest.
-        support_pose_relative_threshold: 1.0e-1
-        # cos(theta)>=0.7 defines a reliable common principal direction.
+        # Numerical rank threshold only; physical support-mode selection still
+        # comes from the generalized support-quality threshold above.
+        support_basis_relative_singular_threshold: 1.0e-6
+        # Tikhonov strength for the scan-wide pose-to-knot least-squares lift,
+        # relative to the largest reference information eigenvalue.
+        lift_regularization: 1.0e-6
+        # cos(theta)>=0.7 defines a reliable 6K common principal direction.
         principal_cosine_threshold: 7.0e-1
+        # Shadow-only temporal gate. Raw routes remain logged; stable routes
+        # and recovery_ready require route and global-knot projector continuity.
+        route_consecutive_scans: 3
+        projector_consecutive_scans: 3
+        projector_similarity_threshold: 8.0e-1
 
 
 ### EvalutaionParams ###

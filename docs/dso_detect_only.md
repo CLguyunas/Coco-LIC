@@ -59,8 +59,12 @@ dso_detect_only:
         shadow_only: true
         output_csv: true
         environment_relative_threshold: 6.0e-3
-        support_pose_relative_threshold: 1.0e-1
+        support_basis_relative_singular_threshold: 1.0e-6
+        lift_regularization: 1.0e-6
         principal_cosine_threshold: 7.0e-1
+        route_consecutive_scans: 3
+        projector_consecutive_scans: 3
+        projector_similarity_threshold: 8.0e-1
 ```
 
 When the block is absent or `enabled` is `false`, no analysis is performed.
@@ -242,53 +246,81 @@ sweep severity, and verify that injected support quality responds monotonically
 while the original support fields and trajectory accuracy stay inside repeated
 baseline variation.
 
-## Stage 3: CASR shadow recovery
+## Stage 3: CASR-v2 knot-space shadow recovery
 
-The first CASR stage converts the two diagnostic spaces into a common scaled
-6DoF coordinate order:
-
-```text
-[range * dtheta_x, range * dtheta_y, range * dtheta_z, dt_x, dt_y, dt_z].
-```
-
-The environment weak basis comes directly from the 6DoF eigenvectors whose
-relative eigenvalues remain inside `environment_relative_threshold` while the
-persistent environment state is active.
-
-The spline-support weak modes originally live in a `6K` control-point space.
-For every generalized mode below the support enter threshold, CASR takes each
-control point's six-element block, applies the same scene-range rotation scale
-as the environment detector, and accumulates its outer product. Per-knot outer
-products are used instead of summing the blocks, because alternating temporal
-modes can have opposite signs and must not cancel. The trace-normalized result
-is a 6-by-6 support-pose weakness matrix. When no raw mode is below the enter
-threshold, the weakest mode is still prepared as a fallback, but it is ignored
-unless support hysteresis is active.
-
-Let `U_e` and `U_s` be the active environment and support-pose bases. CASR
-computes the singular values of
+CASR-v1 folded every weak `6K` spline mode into a 6-by-6 matrix by summing
+per-knot outer products. Controlled compression showed that this can become an
+almost isotropic, full-rank pose space: temporal signs and control-point
+localization disappear, and every environment direction then appears to be a
+trivial common direction. CASR-v2 removes that fold. Both causes are compared
+in the active control-point coordinates
 
 ```text
-U_e^T U_s.
+z = [r*dtheta_0, dp_0, ..., r*dtheta_(K-1), dp_(K-1)],
 ```
 
-These are the principal-angle cosines. The normalized squared sum is logged as
-`overlap_score`. A common direction is retained only when its principal cosine
-is at least `principal_cosine_threshold`. This gives the shadow routing table:
+where `r` is the same characteristic range used by the environment detector.
+The generalized spline modes are transformed to `z` and Euclidean-
+orthonormalized to obtain the support weak basis `U_s^K`. The support-quality
+threshold still decides which physical modes are weak;
+`support_basis_relative_singular_threshold` only removes numerical linear
+dependence.
 
-| Cause | Shadow route | Candidate projector |
+The environment weak basis `U_e` remains the 6DoF map-frame eigenvectors whose
+relative eigenvalues are inside `environment_relative_threshold`. For every
+uniform reference timestamp `t_j`, CASR constructs the exact mapping `B_j`
+from scaled NURBS knot perturbations to the scaled map-frame LiDAR pose. Its
+rotation block converts the NURBS right perturbation to the detector's
+map-frame left perturbation, and its translation block includes the LiDAR-IMU
+lever arm. Each environment direction is lifted over the entire scan by
+
+```text
+x_e = (mean_j B_j^T B_j + lambda I)^(-1) mean_j B_j^T e,
+```
+
+with `lambda` controlled by `lift_regularization` relative to the largest
+reference-information eigenvalue. Orthonormalizing the lifted columns gives
+`U_e^K`. `environment_lift_residual` records how well one knot perturbation
+reproduces the same map-frame direction over the scan.
+
+CASR-v2 computes the singular values of
+
+```text
+(U_e^K)^T U_s^K.
+```
+
+These are the control-point-space principal-angle cosines. The normalized
+squared sum is `overlap_score`. A common direction is retained only when its
+cosine is at least `principal_cosine_threshold`. Routing is therefore:
+
+| Cause | Raw shadow route | Knot-space candidate |
 |---:|---|---|
-| `0` | `inactive` | zero |
-| `1` | `environment_candidate` | environment weak subspace |
-| `2` | `support_candidate` | support-pose weak subspace |
-| `3`, common direction exists | `coupled_common_candidate` | common weak subspace |
-| `3`, no reliable common direction | `coupled_conflict` | zero; defer action |
+| `0` | `inactive` | empty |
+| `1` | `environment_candidate` | lifted environment weak basis |
+| `2` | `support_candidate` | generalized support weak basis |
+| `3`, common direction exists | `coupled_common_candidate` | principal common basis |
+| `3`, no reliable common direction | `coupled_conflict` | empty; defer action |
 
-The explicit conflict route is important: a coupled label alone is not enough
-to justify inventing a recovery direction. The later estimator-intervention
-stage may use different priors for exclusive directions, but this shadow stage
-only exports a projector that is geometrically supported by the measured
-subspaces.
+The explicit conflict route remains essential: a coupled label alone cannot
+justify inventing a recovery direction. `recovery_rank` now means knot-space
+rank. The logged 6-by-6 recovery matrix is only the candidate mapped at the
+scan's representative timestamp; it is a compact inspection view and is not
+used for routing.
+
+CASR-v2 also adds an independent temporal gate. `stable_route` changes only
+after `route_consecutive_scans` identical raw candidates. Candidate continuity
+is measured after aligning overlapping **global knot indices**:
+
+```text
+similarity = ||U_previous^T U_current||_F^2 /
+             max(rank_previous, rank_current).
+```
+
+`recovery_ready` becomes true only after the stable route matches the raw route
+and the similarity remains above `projector_similarity_threshold` for
+`projector_consecutive_scans`. Raw routes remain logged, so the filter cannot
+hide a flickering detector. The real and injected-copy paths keep separate
+temporal states.
 
 When enabled, CASR writes:
 
@@ -296,17 +328,18 @@ When enabled, CASR writes:
 config/data/degenerate_seq_02_casr_shadow.csv
 ```
 
-Each row contains the real route and, when support injection is enabled, the
-injected-copy route. For both paths it records the cause, environment/support/
-common/recovery ranks, principal-cosine range, overlap and exclusive-energy
-ratios, support-pose eigenvalues, and the 21 upper-triangular entries of the
-symmetric recovery projector. The original 81-column observability CSV and
-45-column injection CSV remain unchanged.
+Each row contains real and optional injected-copy blocks. In addition to the
+raw cause/route, ranks, principal cosines, overlap, exclusive ratios and the
+representative 6DoF matrix, the v2 block records `method_version`, active knot
+start/dimension, lift residual, basis orthogonality error, stable route,
+pending-route count, temporal similarity, consistency count, and
+`recovery_ready`. The original 81-column observability CSV and 45-column
+injection CSV remain unchanged.
 
 `CASR-Shadow` still does not modify Ceres, the spline, measurements, the map,
 or the marginalization prior. A configuration with `shadow_only: false` is
-refused. Therefore this stage validates the proposed direction-selection
-mechanism, not trajectory recovery performance.
+refused. Therefore this stage validates the proposed knot-space direction
+selection and stability mechanism, not trajectory recovery performance.
 
 ## Baseline non-interference check
 
@@ -359,8 +392,11 @@ validate the CASR shadow router. For the first CASR replay, keep the validated
 `timestamp_compression`, severity `0.75`, phase `0.0-1.0`, and seed `42`, then
 check that support-only frames select `support_candidate`, coupled frames
 select `coupled_common_candidate` or the explicit conflict route, every
-recovery projector is symmetric/idempotent within numerical tolerance, and
-the trajectory remains inside the repeated detector-OFF envelope. This still
-does not validate recovery accuracy; estimator intervention remains the next
-stage and must be evaluated separately with cause-specific ATE/RPE and
-consistency metrics.
+knot basis is orthonormal within numerical tolerance, environment-lift
+residuals remain finite, the stable route suppresses isolated raw-route
+flips, and `recovery_ready` is never asserted during an unstable transition.
+Use at least five repeated detector-OFF and shadow-ON runs to report ATE/RPE
+mean and standard deviation; two extrema alone are not a non-interference
+test. This still does not validate recovery accuracy. Estimator intervention
+remains a later stage and must be evaluated separately with cause-specific
+ATE/RPE and consistency metrics.
