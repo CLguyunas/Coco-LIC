@@ -8,6 +8,7 @@
 #pragma once
 
 #include <degeneracy/degeneracy_hysteresis.h>
+#include <degeneracy/support_degradation_injector.h>
 
 #include <Eigen/Core>
 #include <lidar/lidar_feature.h>
@@ -86,6 +87,17 @@ namespace cocolic
         Eigen::Matrix<double, 6, 6>::Identity();
   };
 
+  struct SupportInjectionDiagnostic
+  {
+    SupportInjectionMetadata metadata;
+    ObservabilityResult injected_support;
+
+    // Combines the real environment state with the injected support state.
+    // It is written only to the injection CSV and never replaces the real
+    // degeneracy_cause used by the main diagnostic stream.
+    int degeneracy_cause = -1;
+  };
+
   class ObservabilityAnalyzer
   {
   public:
@@ -106,10 +118,16 @@ namespace cocolic
 
     const ObservabilityResult &LastResult() const { return last_result_; }
 
+    const SupportInjectionDiagnostic &LastInjectionResult() const
+    {
+      return last_injection_result_;
+    }
+
   private:
     ObservabilityResult Analyze(
         int64_t scan_timestamp_ns,
-        const Eigen::aligned_vector<PointCorrespondence> &point_corrs) const;
+        const Eigen::aligned_vector<PointCorrespondence> &point_corrs,
+        std::vector<WeightedTimestamp> *weighted_timestamps) const;
 
     double ComputeCharacteristicRange(
         const Eigen::aligned_vector<PointCorrespondence> &point_corrs) const;
@@ -119,11 +137,20 @@ namespace cocolic
                            Eigen::Matrix<double, 1, 6> &jacobian) const;
 
     void AnalyzeSplineSupport(
-        const std::vector<std::pair<int64_t, double>> &weighted_timestamps,
+        const std::vector<WeightedTimestamp> &weighted_timestamps,
         ObservabilityResult &result) const;
+
+    void AnalyzeInjectedSupport(
+        const std::vector<WeightedTimestamp> &weighted_timestamps,
+        const ObservabilityResult &original_result);
 
     void WriteCsvHeader();
     void WriteCsvRow(const ObservabilityResult &result);
+    void WriteInjectionCsvHeader();
+    void WriteInjectionCsvRow(
+        int64_t scan_timestamp_ns,
+        const ObservabilityResult &original_result,
+        const SupportInjectionDiagnostic &injection_result);
     void PrintSummary(const ObservabilityResult &result) const;
 
   private:
@@ -151,12 +178,20 @@ namespace cocolic
     int support_enter_consecutive_scans_ = 10;
     int support_exit_consecutive_scans_ = 10;
 
+    bool support_injection_enabled_ = false;
+    bool support_injection_output_csv_ = true;
+    SupportDegradationInjector support_injector_;
+
     size_t scan_counter_ = 0;
     std::string csv_path_;
     std::ofstream csv_stream_;
+    std::string injection_csv_path_;
+    std::ofstream injection_csv_stream_;
     DegeneracyHysteresis degeneracy_hysteresis_;
     DegeneracyHysteresis support_hysteresis_;
+    DegeneracyHysteresis injected_support_hysteresis_;
     ObservabilityResult last_result_;
+    SupportInjectionDiagnostic last_injection_result_;
   };
 
 } // namespace cocolic

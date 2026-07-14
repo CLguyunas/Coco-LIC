@@ -107,6 +107,35 @@ namespace cocolic
     support_exit_consecutive_scans_ = std::max(
         1, ReadValue<int>(node, "support_exit_consecutive_scans", 10));
 
+    const YAML::Node injection_node =
+        node ? node["support_injection"] : YAML::Node();
+    const bool injection_requested =
+        ReadValue<bool>(injection_node, "enabled", false);
+    const bool diagnostics_only =
+        ReadValue<bool>(injection_node, "diagnostics_only", true);
+    support_injection_output_csv_ =
+        ReadValue<bool>(injection_node, "output_csv", true);
+    const std::string injection_mode_name = ReadValue<std::string>(
+        injection_node, "mode", "timestamp_compression");
+    SupportInjectionMode injection_mode = SupportInjectionMode::Disabled;
+    const bool injection_mode_valid =
+        SupportDegradationInjector::ParseMode(injection_mode_name,
+                                               injection_mode);
+    SupportInjectionConfig injection_config;
+    injection_config.enabled = injection_requested && diagnostics_only &&
+                               support_enabled_ && injection_mode_valid;
+    injection_config.mode = injection_mode;
+    injection_config.severity =
+        ReadValue<double>(injection_node, "severity", 0.5);
+    injection_config.phase_start =
+        ReadValue<double>(injection_node, "phase_start", 0.0);
+    injection_config.phase_end =
+        ReadValue<double>(injection_node, "phase_end", 1.0);
+    injection_config.random_seed =
+        ReadValue<uint64_t>(injection_node, "random_seed", 42);
+    support_injector_.Configure(injection_config);
+    support_injection_enabled_ = support_injector_.Enabled();
+
     degeneracy_hysteresis_.Configure(
         enter_relative_eigenvalue_threshold_,
         exit_relative_eigenvalue_threshold_, enter_consecutive_scans_,
@@ -114,10 +143,29 @@ namespace cocolic
     support_hysteresis_.Configure(
         support_enter_quality_threshold_, support_exit_quality_threshold_,
         support_enter_consecutive_scans_, support_exit_consecutive_scans_);
+    injected_support_hysteresis_.Configure(
+        support_enter_quality_threshold_, support_exit_quality_threshold_,
+        support_enter_consecutive_scans_, support_exit_consecutive_scans_);
 
     if (!enabled_)
     {
       return;
+    }
+
+    if (injection_requested && !diagnostics_only)
+    {
+      std::cerr << "[DSO-DetectOnly] support_injection refused: "
+                   "diagnostics_only must remain true.\n";
+    }
+    if (injection_requested && !support_enabled_)
+    {
+      std::cerr << "[DSO-DetectOnly] support_injection disabled because "
+                   "support_enabled is false.\n";
+    }
+    if (injection_requested && !injection_mode_valid)
+    {
+      std::cerr << "[DSO-DetectOnly] support_injection disabled: unknown "
+                << "mode '" << injection_mode_name << "'.\n";
     }
 
     csv_path_ = output_prefix + "_dso_observability.csv";
@@ -135,6 +183,23 @@ namespace cocolic
       }
     }
 
+    injection_csv_path_ = output_prefix + "_dso_support_injection.csv";
+    if (support_injection_enabled_ && support_injection_output_csv_)
+    {
+      injection_csv_stream_.open(injection_csv_path_,
+                                 std::ios::out | std::ios::trunc);
+      if (!injection_csv_stream_.is_open())
+      {
+        std::cerr << "[DSO-DetectOnly] Cannot open injection CSV: "
+                  << injection_csv_path_
+                  << ". Console injection diagnostics remain enabled.\n";
+      }
+      else
+      {
+        WriteInjectionCsvHeader();
+      }
+    }
+
     std::cout << "[DSO-DetectOnly] enabled | min_corr="
               << min_correspondences_ << " | hard_threshold="
               << relative_eigenvalue_threshold_ << " | enter/exit="
@@ -145,7 +210,19 @@ namespace cocolic
               << " | support_enter/exit="
               << support_enter_quality_threshold_ << "/"
               << support_exit_quality_threshold_
-              << " | csv="
+              << " | support_injection=" << support_injection_enabled_;
+    if (support_injection_enabled_)
+    {
+      const SupportInjectionConfig &config = support_injector_.Config();
+      std::cout << "(" << SupportDegradationInjector::ModeName(config.mode)
+                << ",severity=" << config.severity << ",phase="
+                << config.phase_start << "-" << config.phase_end << ")"
+                << " | injection_csv="
+                << (injection_csv_stream_.is_open()
+                        ? injection_csv_path_
+                        : std::string("disabled"));
+    }
+    std::cout << " | csv="
               << (csv_stream_.is_open() ? csv_path_ : std::string("disabled"))
               << std::endl;
   }
@@ -156,6 +233,11 @@ namespace cocolic
     {
       csv_stream_.flush();
       csv_stream_.close();
+    }
+    if (injection_csv_stream_.is_open())
+    {
+      injection_csv_stream_.flush();
+      injection_csv_stream_.close();
     }
   }
 
@@ -174,7 +256,9 @@ namespace cocolic
       return last_result_;
     }
 
-    last_result_ = Analyze(scan_timestamp_ns, point_corrs);
+    std::vector<WeightedTimestamp> weighted_timestamps;
+    last_result_ =
+        Analyze(scan_timestamp_ns, point_corrs, &weighted_timestamps);
     std::array<double, 6> relative_eigenvalues;
     for (int i = 0; i < 6; ++i)
     {
@@ -213,6 +297,13 @@ namespace cocolic
     }
     WriteCsvRow(last_result_);
 
+    if (support_injection_enabled_)
+    {
+      AnalyzeInjectedSupport(weighted_timestamps, last_result_);
+      WriteInjectionCsvRow(scan_timestamp_ns, last_result_,
+                           last_injection_result_);
+    }
+
     if (scan_counter_ == 1 ||
         scan_counter_ % static_cast<size_t>(print_every_n_scans_) == 0)
     {
@@ -223,7 +314,8 @@ namespace cocolic
 
   ObservabilityResult ObservabilityAnalyzer::Analyze(
       int64_t scan_timestamp_ns,
-      const Eigen::aligned_vector<PointCorrespondence> &point_corrs) const
+      const Eigen::aligned_vector<PointCorrespondence> &point_corrs,
+      std::vector<WeightedTimestamp> *weighted_timestamps) const
   {
     ObservabilityResult result;
     result.scan_timestamp_ns = scan_timestamp_ns;
@@ -231,8 +323,12 @@ namespace cocolic
 
     Eigen::Matrix<double, 6, 6> information =
         Eigen::Matrix<double, 6, 6>::Zero();
-    std::vector<std::pair<int64_t, double>> weighted_timestamps;
-    weighted_timestamps.reserve(point_corrs.size());
+    std::vector<WeightedTimestamp> local_weighted_timestamps;
+    std::vector<WeightedTimestamp> &support_timestamps =
+        weighted_timestamps ? *weighted_timestamps
+                            : local_weighted_timestamps;
+    support_timestamps.clear();
+    support_timestamps.reserve(point_corrs.size());
 
     for (const auto &pc : point_corrs)
     {
@@ -253,7 +349,7 @@ namespace cocolic
           weighted_jacobian.transpose() * weighted_jacobian;
       if (factor_weight > 0.0)
       {
-        weighted_timestamps.emplace_back(pc.t_point, factor_weight);
+        support_timestamps.emplace_back(pc.t_point, factor_weight);
       }
 
       ++result.correspondence_num;
@@ -306,7 +402,7 @@ namespace cocolic
     result.valid = true;
     if (support_enabled_)
     {
-      AnalyzeSplineSupport(weighted_timestamps, result);
+      AnalyzeSplineSupport(support_timestamps, result);
     }
     return result;
   }
@@ -404,7 +500,7 @@ namespace cocolic
   }
 
   void ObservabilityAnalyzer::AnalyzeSplineSupport(
-      const std::vector<std::pair<int64_t, double>> &weighted_timestamps,
+      const std::vector<WeightedTimestamp> &weighted_timestamps,
       ObservabilityResult &result) const
   {
     if (!trajectory_ || weighted_timestamps.size() <
@@ -764,6 +860,38 @@ namespace cocolic
     result.support_boundary_energy_ratio = boundary_energy;
   }
 
+  void ObservabilityAnalyzer::AnalyzeInjectedSupport(
+      const std::vector<WeightedTimestamp> &weighted_timestamps,
+      const ObservabilityResult &original_result)
+  {
+    last_injection_result_ = SupportInjectionDiagnostic();
+    std::vector<WeightedTimestamp> injected_timestamps;
+    last_injection_result_.metadata =
+        support_injector_.Apply(weighted_timestamps, injected_timestamps);
+
+    ObservabilityResult &injected =
+        last_injection_result_.injected_support;
+    injected.scan_timestamp_ns = original_result.scan_timestamp_ns;
+    AnalyzeSplineSupport(injected_timestamps, injected);
+
+    const DegeneracyDecision decision = injected_support_hysteresis_.Update(
+        injected.support_valid, injected.support_quality_min,
+        injected.support_weak_direction_num);
+    injected.support_weak_direction_num =
+        decision.candidate_weak_direction_num;
+    injected.support_score = decision.degeneracy_score;
+    injected.support_degenerate_state = decision.degenerate_state;
+    injected.support_enter_counter = decision.enter_counter;
+    injected.support_exit_counter = decision.exit_counter;
+
+    if (original_result.valid && injected.support_valid)
+    {
+      last_injection_result_.degeneracy_cause =
+          (original_result.degenerate_state ? 1 : 0) +
+          (injected.support_degenerate_state ? 2 : 0);
+    }
+  }
+
   void ObservabilityAnalyzer::WriteCsvHeader()
   {
     if (!csv_stream_.is_open())
@@ -866,6 +994,98 @@ namespace cocolic
     csv_stream_.flush();
   }
 
+  void ObservabilityAnalyzer::WriteInjectionCsvHeader()
+  {
+    if (!injection_csv_stream_.is_open())
+    {
+      return;
+    }
+
+    injection_csv_stream_
+        << "scan_timestamp_s,injection_mode_code,injection_mode,"
+           "injection_severity,phase_start,phase_end,random_seed,"
+           "injection_applied,input_sample_num,selected_sample_num,"
+           "modified_sample_num,removed_sample_num,output_sample_num,"
+           "retained_ratio,timestamp_span_ratio,environment_valid,"
+           "environment_relative_lambda_0,environment_score,"
+           "environment_state,original_support_valid,"
+           "original_support_quality_min,original_support_weak_direction_num,"
+           "original_support_state,original_degeneracy_cause,"
+           "injected_support_valid,injected_support_control_point_num,"
+           "injected_support_interval_num,injected_support_dimension,"
+           "injected_support_effective_rank,"
+           "injected_support_weak_direction_num,"
+           "injected_support_time_span_s,injected_support_min_knot_dt_s,"
+           "injected_support_max_knot_dt_s,"
+           "injected_support_quality_min,"
+           "injected_support_condition_number,injected_support_score,"
+           "injected_support_state,injected_support_enter_counter,"
+           "injected_support_exit_counter,"
+           "injected_support_weakest_knot_index,"
+           "injected_support_weakest_knot_energy_ratio,"
+           "injected_support_weakest_rotation_ratio,"
+           "injected_support_boundary_energy_ratio,"
+           "injected_degeneracy_cause\n";
+    injection_csv_stream_.flush();
+  }
+
+  void ObservabilityAnalyzer::WriteInjectionCsvRow(
+      int64_t scan_timestamp_ns,
+      const ObservabilityResult &original_result,
+      const SupportInjectionDiagnostic &injection_result)
+  {
+    if (!injection_csv_stream_.is_open())
+    {
+      return;
+    }
+
+    const SupportInjectionMetadata &metadata = injection_result.metadata;
+    const ObservabilityResult &injected = injection_result.injected_support;
+    injection_csv_stream_
+        << std::setprecision(12)
+        << scan_timestamp_ns * Trajectory::NS_TO_S << ','
+        << static_cast<int>(metadata.mode) << ','
+        << SupportDegradationInjector::ModeName(metadata.mode) << ','
+        << metadata.severity << ',' << metadata.phase_start << ','
+        << metadata.phase_end << ',' << metadata.random_seed << ','
+        << static_cast<int>(metadata.applied) << ','
+        << metadata.input_sample_num << ',' << metadata.selected_sample_num
+        << ',' << metadata.modified_sample_num << ','
+        << metadata.removed_sample_num << ',' << metadata.output_sample_num
+        << ',' << metadata.retained_ratio << ','
+        << metadata.timestamp_span_ratio << ','
+        << static_cast<int>(original_result.valid) << ','
+        << original_result.relative_eigenvalues[0] << ','
+        << original_result.degeneracy_score << ','
+        << static_cast<int>(original_result.degenerate_state) << ','
+        << static_cast<int>(original_result.support_valid) << ','
+        << original_result.support_quality_min << ','
+        << original_result.support_weak_direction_num << ','
+        << static_cast<int>(original_result.support_degenerate_state) << ','
+        << original_result.degeneracy_cause << ','
+        << static_cast<int>(injected.support_valid) << ','
+        << injected.support_control_point_num << ','
+        << injected.support_interval_num << ','
+        << injected.support_dimension << ','
+        << injected.support_effective_rank << ','
+        << injected.support_weak_direction_num << ','
+        << injected.support_time_span_s << ','
+        << injected.support_min_knot_dt_s << ','
+        << injected.support_max_knot_dt_s << ','
+        << injected.support_quality_min << ','
+        << injected.support_condition_number << ','
+        << injected.support_score << ','
+        << static_cast<int>(injected.support_degenerate_state) << ','
+        << injected.support_enter_counter << ','
+        << injected.support_exit_counter << ','
+        << injected.support_weakest_knot_index << ','
+        << injected.support_weakest_knot_energy_ratio << ','
+        << injected.support_weakest_rotation_ratio << ','
+        << injected.support_boundary_energy_ratio << ','
+        << injection_result.degeneracy_cause << '\n';
+    injection_csv_stream_.flush();
+  }
+
   void ObservabilityAnalyzer::PrintSummary(
       const ObservabilityResult &result) const
   {
@@ -887,7 +1107,22 @@ namespace cocolic
               << " | cause="
               << DegeneracyCauseName(result.degeneracy_cause)
               << " | rel_eigs="
-              << result.relative_eigenvalues.transpose() << std::endl;
+              << result.relative_eigenvalues.transpose();
+    if (support_injection_enabled_)
+    {
+      const ObservabilityResult &injected =
+          last_injection_result_.injected_support;
+      std::cout << " | injection="
+                << SupportDegradationInjector::ModeName(
+                       last_injection_result_.metadata.mode)
+                << " | injected_q=" << injected.support_quality_min
+                << " | injected_support_state="
+                << static_cast<int>(injected.support_degenerate_state)
+                << " | injected_cause="
+                << DegeneracyCauseName(
+                       last_injection_result_.degeneracy_cause);
+    }
+    std::cout << std::endl;
   }
 
 } // namespace cocolic

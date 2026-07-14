@@ -68,6 +68,22 @@ dso_detect_only:
     support_exit_quality_threshold: 5.0e-2
     support_enter_consecutive_scans: 10
     support_exit_consecutive_scans: 10
+    # Stage 2 validation harness. It transforms only a timestamp/weight copy
+    # read by the support diagnostic and writes a separate injection CSV.
+    # Keep diagnostics_only true; a false value is refused by the code.
+    support_injection:
+        enabled: false
+        diagnostics_only: true
+        output_csv: true
+        # timestamp_compression | phase_dropout | boundary_dropout |
+        # temporal_thinning
+        mode: timestamp_compression
+        severity: 0.5
+        # Normalized within-scan phase, independent of bag duration/sensor Hz.
+        # Use 0.0/1.0 for compression; 0.2/0.8 is a useful dropout window.
+        phase_start: 0.0
+        phase_end: 1.0
+        random_seed: 42
 
 
 ### EvalutaionParams ###

@@ -45,10 +45,21 @@ dso_detect_only:
     support_exit_quality_threshold: 5.0e-2
     support_enter_consecutive_scans: 10
     support_exit_consecutive_scans: 10
+    support_injection:
+        enabled: false
+        diagnostics_only: true
+        output_csv: true
+        mode: timestamp_compression
+        severity: 0.5
+        phase_start: 0.0
+        phase_end: 1.0
+        random_seed: 42
 ```
 
 When the block is absent or `enabled` is `false`, no analysis is performed.
 Setting only `support_enabled: false` preserves the environment-space detector.
+The controlled injector is off by default and additionally requires
+`diagnostics_only: true`; the implementation refuses any other setting.
 
 ## Output
 
@@ -157,6 +168,61 @@ their inputs are valid:
 The label is logging-only. It does not select residual weights or modify the
 trajectory.
 
+## Controlled support-degradation injection
+
+The optional `support_injection` block is an experimental validation harness,
+not part of the online detector or CASR recovery path. It copies only the
+accepted `(timestamp, correspondence_weight)` pairs and transforms that copy
+before a second spline-support analysis. The original correspondences and
+timestamps still feed the environment diagnostic, the real spline-support
+diagnostic, and the estimator without modification.
+
+When enabled, a second file is written next to the main CSV:
+
+```text
+config/data/degenerate_seq_02_dso_support_injection.csv
+```
+
+The main `*_dso_observability.csv` keeps its existing 81 columns and its real
+`degeneracy_cause`. The injection CSV records both original and injected
+support metrics, sample counts, retained/time-span ratios, injected hysteresis,
+and `injected_degeneracy_cause`. The injected cause combines the **real**
+environment state with the **injected-copy** support state:
+
+| Real environment | Injected support | Injected cause |
+|---|---|---:|
+| healthy | healthy | `0` |
+| weak | healthy | `1` |
+| healthy | weak | `2` |
+| weak | weak | `3` |
+
+All phase parameters are normalized independently inside each scan:
+
+```text
+s_i = (t_i - t_min) / (t_max - t_min).
+```
+
+This avoids hard-coding a bag timestamp, scan duration, LiDAR rate, or the
+`Tunneling_tunnel4_gamma` sequence. Available modes are:
+
+- `timestamp_compression`: move timestamps in `[phase_start, phase_end]`
+  toward the phase-window center; `severity=1` collapses them to the center;
+- `phase_dropout`: remove selected-window samples with probability `severity`;
+- `boundary_dropout`: remove samples outside the selected central window with
+  probability `severity`;
+- `temporal_thinning`: remove samples across the whole scan with probability
+  `severity`, mainly testing evidence-count/invalid handling.
+
+Dropout uses a deterministic hash of the timestamp, sample index, and
+`random_seed`, so the same input and configuration produce the same diagnostic
+copy. No global random generator or estimator scheduling state is touched.
+
+The implementation is sequence-independent, but empirical generalization must
+still be demonstrated. Use fixed phase parameters and seeds on multiple bags,
+sweep severity, and verify that injected support quality responds monotonically
+while the original support fields and trajectory accuracy stay inside repeated
+baseline variation.
+
 ## Baseline non-interference check
 
 Run the same bag twice, changing only `enabled`:
@@ -186,3 +252,23 @@ provide the new `*_dso_observability.csv`. First verify that
 cause classes. Do not tune thresholds from trajectory ATE alone: tune them from
 stable temporal segments and confirm that the continuous support signal is not
 merely duplicating `relative_lambda_0`.
+
+## Injection validation and CASR routing table
+
+Start with `timestamp_compression`, fixed `phase_start/end=0.0/1.0`, seed 42,
+and severities `0.0, 0.25, 0.5, 0.75, 1.0`. For every run preserve both CSVs
+and the trajectory. A valid harness should show:
+
+1. severity 0 reproduces the original support metrics up to numerical error;
+2. increasing compression reduces `injected_support_quality_min` in affected
+   scans without changing `original_support_quality_min`;
+3. the real environment fields are identical in definition and see no injected
+   timestamps;
+4. `enabled: false` creates no injection CSV and preserves the previous path;
+5. ON/OFF trajectory differences remain within repeated-run scheduling noise.
+
+Together, an original run and an injected run provide the four cause cases
+needed to test the future cause-adaptive CASR router. They do not yet validate
+CASR recovery performance: CASR remains a later estimator intervention and
+must be evaluated separately against cause-specific accuracy and consistency
+metrics.

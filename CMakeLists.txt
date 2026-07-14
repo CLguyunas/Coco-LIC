@@ -122,6 +122,7 @@ add_executable(odometry_node
    src/odom/trajectory_estimator.cpp
    src/odom/odometry_manager.cpp
    src/degeneracy/observability_analyzer.cpp
+   src/degeneracy/support_degradation_injector.cpp
    src/odom/factor/analytic_diff/marginalization_factor.cpp
    src/utils/parameter_struct.cpp
 )
