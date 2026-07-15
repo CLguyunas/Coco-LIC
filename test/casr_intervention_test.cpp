@@ -1,0 +1,221 @@
+#include <degeneracy/casr_intervention.h>
+#include <odom/factor/analytic_diff/casr_subspace_factor.h>
+
+#include <gtest/gtest.h>
+
+#include <cmath>
+#include <vector>
+
+namespace cocolic
+{
+  namespace
+  {
+    CasrShadowResult ReadyEnvironmentResult()
+    {
+      CasrShadowResult result;
+      result.valid = true;
+      result.route = CasrRoute::EnvironmentCandidate;
+      result.stable_route = result.route;
+      result.recovery_ready = true;
+      result.scheduler_eligible = true;
+      result.scheduler_active = true;
+      result.scheduler_activation_strength = 0.6;
+      result.support_control_point_start_index = 4;
+      result.support_knot_dimension = 12;
+      result.recovery_rank = 1;
+      result.recovery_knot_basis = Eigen::MatrixXd::Zero(12, 1);
+      result.recovery_knot_basis(0, 0) = 1.0;
+      result.recovery_basis_orthogonality_error = 0.0;
+      return result;
+    }
+  } // namespace
+
+  TEST(CasrInterventionPlan, RequiresExplicitEstimatorArming)
+  {
+    CasrInterventionConfig config;
+    config.enabled = true;
+    config.apply_to_estimator = false;
+    config.base_information_weight = 4.0;
+    const CasrShadowResult result = ReadyEnvironmentResult();
+
+    const CasrInterventionPlan dry_run =
+        BuildCasrInterventionPlan(config, result, 2.0, 10);
+    EXPECT_TRUE(dry_run.eligible);
+    EXPECT_EQ(dry_run.state, CasrInterventionState::DryRun);
+    EXPECT_EQ(dry_run.control_point_num, 2);
+    EXPECT_NEAR(dry_run.effective_information_weight, 2.4, 1e-12);
+    EXPECT_NEAR(dry_run.sqrt_information_weight, std::sqrt(2.4), 1e-12);
+
+    config.apply_to_estimator = true;
+    const CasrInterventionPlan armed =
+        BuildCasrInterventionPlan(config, result, 2.0, 10);
+    EXPECT_TRUE(armed.eligible);
+    EXPECT_EQ(armed.state, CasrInterventionState::Applied);
+  }
+
+  TEST(CasrInterventionPlan, RejectsUnsafeAndStaleRoutes)
+  {
+    CasrInterventionConfig config;
+    config.enabled = true;
+    config.apply_to_estimator = true;
+
+    CasrShadowResult conflict = ReadyEnvironmentResult();
+    conflict.route = CasrRoute::CoupledConflict;
+    conflict.stable_route = conflict.route;
+    const CasrInterventionPlan unsafe =
+        BuildCasrInterventionPlan(config, conflict, 2.0, 10);
+    EXPECT_FALSE(unsafe.eligible);
+    EXPECT_EQ(unsafe.state, CasrInterventionState::UnsafeRoute);
+
+    CasrShadowResult mismatch = ReadyEnvironmentResult();
+    mismatch.stable_route = CasrRoute::Inactive;
+    const CasrInterventionPlan stale =
+        BuildCasrInterventionPlan(config, mismatch, 2.0, 10);
+    EXPECT_FALSE(stale.eligible);
+    EXPECT_EQ(stale.state, CasrInterventionState::RouteMismatch);
+  }
+
+  TEST(CasrInterventionPlan, RejectsDiagnosticsCopyEvenWhenOtherwiseReady)
+  {
+    CasrInterventionConfig config;
+    config.enabled = true;
+    config.apply_to_estimator = true;
+    CasrShadowResult result = ReadyEnvironmentResult();
+    result.data_source = CasrDataSource::DiagnosticsCopy;
+
+    const CasrInterventionPlan plan =
+        BuildCasrInterventionPlan(config, result, 2.0, 10);
+    EXPECT_FALSE(plan.eligible);
+    EXPECT_EQ(plan.state,
+              CasrInterventionState::DiagnosticsCopyBlocked);
+  }
+
+  TEST(CasrInterventionPlan, CapsInformationAndRechecksOrthonormality)
+  {
+    CasrInterventionConfig config;
+    config.enabled = true;
+    config.apply_to_estimator = true;
+    config.base_information_weight = 1000.0;
+    config.max_effective_information_weight = 7.0;
+    CasrShadowResult result = ReadyEnvironmentResult();
+
+    const CasrInterventionPlan capped =
+        BuildCasrInterventionPlan(config, result, 2.0, 10);
+    ASSERT_TRUE(capped.eligible);
+    EXPECT_DOUBLE_EQ(capped.effective_information_weight, 7.0);
+
+    result.recovery_knot_basis(0, 0) = 2.0;
+    // Do not trust the cached diagnostic scalar: the intervention must
+    // recompute B^T B directly at the estimator boundary.
+    result.recovery_basis_orthogonality_error = 0.0;
+    const CasrInterventionPlan invalid =
+        BuildCasrInterventionPlan(config, result, 2.0, 10);
+    EXPECT_FALSE(invalid.eligible);
+    EXPECT_EQ(invalid.state, CasrInterventionState::InvalidBasis);
+  }
+
+  TEST(CasrSubspaceFactor, PenalizesOnlyRecoveryCoordinates)
+  {
+    using analytic_derivative::CasrSubspaceFactor;
+    using SO3d = Sophus::SO3<double>;
+
+    Eigen::MatrixXd basis = Eigen::MatrixXd::Zero(6, 2);
+    basis(0, 0) = 1.0;
+    basis(3, 1) = 1.0;
+    Eigen::aligned_vector<SO3d> reference_rotations(1, SO3d());
+    Eigen::aligned_vector<Eigen::Vector3d> reference_positions(
+        1, Eigen::Vector3d::Zero());
+    CasrSubspaceFactor factor(basis, reference_rotations,
+                              reference_positions, 3.0, 2.0);
+    ASSERT_TRUE(factor.IsValid());
+
+    Eigen::aligned_vector<SO3d> rotations(
+        1, SO3d::exp(Eigen::Vector3d(0.1, 0.2, 0.0)));
+    Eigen::aligned_vector<Eigen::Vector3d> positions(
+        1, Eigen::Vector3d(0.4, 0.7, 0.0));
+    std::vector<double const *> parameter_blocks{
+        rotations[0].data(), positions[0].data()};
+    Eigen::Vector2d residual;
+    ASSERT_TRUE(factor.Evaluate(parameter_blocks.data(), residual.data(),
+                                nullptr));
+    EXPECT_NEAR(residual[0], 0.6, 1e-10);
+    EXPECT_NEAR(residual[1], 0.8, 1e-12);
+    // Rotation-y and translation-y are orthogonal to the selected subspace.
+  }
+
+  TEST(CasrSubspaceFactor, AnalyticRotationJacobianMatchesRightIncrement)
+  {
+    using analytic_derivative::CasrSubspaceFactor;
+    using SO3d = Sophus::SO3<double>;
+
+    Eigen::MatrixXd basis = Eigen::MatrixXd::Zero(6, 1);
+    basis.block<3, 1>(0, 0) =
+        Eigen::Vector3d(1.0, 2.0, -1.0).normalized();
+    Eigen::aligned_vector<SO3d> reference_rotations(1, SO3d());
+    Eigen::aligned_vector<Eigen::Vector3d> reference_positions(
+        1, Eigen::Vector3d::Zero());
+    CasrSubspaceFactor factor(basis, reference_rotations,
+                              reference_positions, 2.5, 1.7);
+
+    Eigen::aligned_vector<SO3d> rotations(
+        1, SO3d::exp(Eigen::Vector3d(0.12, -0.08, 0.05)));
+    Eigen::aligned_vector<Eigen::Vector3d> positions(
+        1, Eigen::Vector3d::Zero());
+    std::vector<double const *> parameter_blocks{
+        rotations[0].data(), positions[0].data()};
+    double residual = 0.0;
+    Eigen::Matrix<double, 1, 4, Eigen::RowMajor> rotation_jacobian;
+    Eigen::Matrix<double, 1, 3, Eigen::RowMajor> position_jacobian;
+    double *jacobians[] = {rotation_jacobian.data(),
+                           position_jacobian.data()};
+    ASSERT_TRUE(factor.Evaluate(parameter_blocks.data(), &residual,
+                                jacobians));
+
+    const double epsilon = 1e-7;
+    for (int axis = 0; axis < 3; ++axis)
+    {
+      Eigen::Vector3d increment = Eigen::Vector3d::Zero();
+      increment[axis] = epsilon;
+      SO3d perturbed = rotations[0] * SO3d::exp(increment);
+      std::vector<double const *> perturbed_blocks{
+          perturbed.data(), positions[0].data()};
+      double perturbed_residual = 0.0;
+      ASSERT_TRUE(factor.Evaluate(perturbed_blocks.data(),
+                                  &perturbed_residual, nullptr));
+      const double numerical =
+          (perturbed_residual - residual) / epsilon;
+      EXPECT_NEAR(rotation_jacobian(0, axis), numerical, 2e-6);
+    }
+    EXPECT_DOUBLE_EQ(rotation_jacobian(0, 3), 0.0);
+  }
+
+  TEST(CasrSubspaceFactor, UsesInterleavedKnotCoordinatesWithGroupedBlocks)
+  {
+    using analytic_derivative::CasrSubspaceFactor;
+    using SO3d = Sophus::SO3<double>;
+
+    // The Ceres blocks are [R0, R1, p0, p1], while the CASR basis rows are
+    // [r*dtheta0, dp0, r*dtheta1, dp1]. Select p1.z explicitly.
+    Eigen::MatrixXd basis = Eigen::MatrixXd::Zero(12, 1);
+    basis(11, 0) = 1.0;
+    Eigen::aligned_vector<SO3d> reference_rotations(2, SO3d());
+    Eigen::aligned_vector<Eigen::Vector3d> reference_positions(
+        2, Eigen::Vector3d::Zero());
+    CasrSubspaceFactor factor(basis, reference_rotations,
+                              reference_positions, 4.0, 3.0);
+
+    Eigen::aligned_vector<SO3d> rotations(2, SO3d());
+    Eigen::aligned_vector<Eigen::Vector3d> positions(
+        2, Eigen::Vector3d::Zero());
+    positions[0].z() = 9.0;
+    positions[1].z() = 0.25;
+    std::vector<double const *> parameter_blocks{
+        rotations[0].data(), rotations[1].data(),
+        positions[0].data(), positions[1].data()};
+    double residual = 0.0;
+    ASSERT_TRUE(factor.Evaluate(parameter_blocks.data(), &residual,
+                                nullptr));
+    EXPECT_NEAR(residual, 0.75, 1e-12);
+  }
+
+} // namespace cocolic

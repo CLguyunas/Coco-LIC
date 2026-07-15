@@ -24,9 +24,11 @@
 #include <odom/trajectory_estimator.h>
 #include <utils/ceres_callbacks.h>
 
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <thread>
+#include <utility>
 #include <variant>
 
 namespace cocolic
@@ -171,6 +173,132 @@ namespace cocolic
       residual_summary_.AddResidualInfo(RType_Prior, marginalization_factor,
                                         last_marginalization_parameter_blocks);
     }
+  }
+
+  ceres::ResidualBlockId TrajectoryEstimator::AddCasrSubspaceIntervention(
+      int control_point_start_index,
+      const Eigen::MatrixXd &recovery_basis,
+      const Eigen::aligned_vector<SO3d> &reference_rotations,
+      const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
+      double characteristic_range,
+      double sqrt_information_weight)
+  {
+    const int control_point_num =
+        static_cast<int>(reference_rotations.size());
+    if (control_point_start_index < 0 || control_point_num <= 0 ||
+        static_cast<int>(reference_positions.size()) != control_point_num ||
+        recovery_basis.rows() != 6 * control_point_num ||
+        recovery_basis.cols() <= 0 ||
+        control_point_start_index + control_point_num >
+            static_cast<int>(trajectory_->numKnots()))
+    {
+      return nullptr;
+    }
+
+    auto *cost_function = new analytic_derivative::CasrSubspaceFactor(
+        recovery_basis, reference_rotations, reference_positions,
+        characteristic_range, sqrt_information_weight);
+    if (!cost_function->IsValid())
+    {
+      delete cost_function;
+      return nullptr;
+    }
+
+    std::vector<double *> parameter_blocks;
+    parameter_blocks.reserve(static_cast<size_t>(2 * control_point_num));
+    for (int i = 0; i < control_point_num; ++i)
+    {
+      const size_t knot_index = static_cast<size_t>(
+          control_point_start_index + i);
+      double *rotation = trajectory_->getKnotSO3(knot_index).data();
+      parameter_blocks.emplace_back(rotation);
+      problem_->AddParameterBlock(rotation, 4,
+                                  analytic_local_parameterization_);
+      if (options.lock_traj ||
+          (fixed_control_point_index_ >= 0 &&
+           knot_index <= static_cast<size_t>(fixed_control_point_index_)))
+      {
+        problem_->SetParameterBlockConstant(rotation);
+      }
+    }
+    for (int i = 0; i < control_point_num; ++i)
+    {
+      const size_t knot_index = static_cast<size_t>(
+          control_point_start_index + i);
+      double *position = trajectory_->getKnotPos(knot_index).data();
+      parameter_blocks.emplace_back(position);
+      problem_->AddParameterBlock(position, 3);
+      if (options.lock_tran || options.lock_traj ||
+          (fixed_control_point_index_ >= 0 &&
+           knot_index <= static_cast<size_t>(fixed_control_point_index_)))
+      {
+        problem_->SetParameterBlockConstant(position);
+      }
+    }
+
+    return problem_->AddResidualBlock(
+        cost_function, nullptr, parameter_blocks);
+  }
+
+  TrajectoryEstimator::ParameterSnapshot
+  TrajectoryEstimator::CaptureParameterSnapshot() const
+  {
+    ParameterSnapshot snapshot;
+    std::vector<double *> parameter_blocks;
+    problem_->GetParameterBlocks(&parameter_blocks);
+    snapshot.reserve(parameter_blocks.size());
+    for (double *parameter_block : parameter_blocks)
+    {
+      const int size = problem_->ParameterBlockSize(parameter_block);
+      if (!parameter_block || size <= 0)
+      {
+        continue;
+      }
+      ParameterBlockSnapshot block;
+      block.data = parameter_block;
+      block.values.assign(parameter_block, parameter_block + size);
+      snapshot.emplace_back(std::move(block));
+    }
+    return snapshot;
+  }
+
+  bool TrajectoryEstimator::RestoreParameterSnapshot(
+      const ParameterSnapshot &snapshot) const
+  {
+    for (const ParameterBlockSnapshot &block : snapshot)
+    {
+      if (!block.data || block.values.empty() ||
+          !problem_->HasParameterBlock(block.data) ||
+          problem_->ParameterBlockSize(block.data) !=
+              static_cast<int>(block.values.size()))
+      {
+        return false;
+      }
+    }
+    for (const ParameterBlockSnapshot &block : snapshot)
+    {
+      std::copy(block.values.begin(), block.values.end(), block.data);
+    }
+    trajectory_->UpdateExtrinsics();
+    return true;
+  }
+
+  bool TrajectoryEstimator::RemoveResidualBlock(
+      ceres::ResidualBlockId residual_block_id)
+  {
+    if (!residual_block_id)
+    {
+      return false;
+    }
+    std::vector<ceres::ResidualBlockId> residual_blocks;
+    problem_->GetResidualBlocks(&residual_blocks);
+    if (std::find(residual_blocks.begin(), residual_blocks.end(),
+                  residual_block_id) == residual_blocks.end())
+    {
+      return false;
+    }
+    problem_->RemoveResidualBlock(residual_block_id);
+    return true;
   }
 
   void TrajectoryEstimator::AddIMUMeasurementAnalyticNURBS(

@@ -38,8 +38,9 @@ accelerometer_random_walk: 1.96e-06
 
 
 ### DSO-DetectOnly ###
-# Read-only LiDAR 6DoF observability diagnostics. This does not add factors,
-# change weights, update the map, or alter the marginalization prior.
+# LiDAR 6DoF observability diagnostics. The detector, support injector, CASR
+# router, and scheduler are read-only. The separate casr_intervention block
+# below is the only opt-in estimator write path.
 dso_detect_only:
     enabled: true
     output_csv: true
@@ -114,8 +115,9 @@ dso_detect_only:
         projector_consecutive_scans: 3
         projector_similarity_threshold: 8.0e-1
         # Stage 4: cause-aware pre-intervention scheduler. It converts a
-        # recovery_ready candidate into a continuous shadow strength only;
-        # the value is logged and is not consumed by Ceres.
+        # recovery_ready candidate into a continuous shadow strength. The
+        # scheduler itself remains read-only; only the separately armed and
+        # independently gated Stage-5 intervention may consume the real path.
         activation_scheduler:
             enabled: true
             # Full/zero confidence anchors reuse the detector hysteresis
@@ -140,6 +142,27 @@ dso_detect_only:
             rise_time_s: 5.0e-1
             fall_time_s: 2.0e-1
             max_dt_s: 5.0e-1
+    # Stage 5: intervention audit and optional estimator factor. enabled=true
+    # with apply_to_estimator=false is a trajectory-neutral dry run that logs
+    # which frames would receive the factor. Both switches must be true before
+    # Ceres is changed. The factor is added only to the final LIC refinement
+    # and is deliberately excluded from the marginalization prior.
+    casr_intervention:
+        enabled: true
+        apply_to_estimator: false
+        output_csv: true
+        # Cost = 0.5 * base_information_weight * scheduler_activation
+        #        * ||B_recovery^T [r*dtheta, dp]||^2.
+        # Keep 1.0 for the first armed A/B run, then sweep only after the
+        # dry-run CSV confirms valid ranges and bounded increments.
+        base_information_weight: 1.0
+        # Independent hard ceiling after scheduler scaling.
+        max_effective_information_weight: 1.0e+2
+        min_activation_strength: 5.0e-2
+        max_activation_strength: 1.0
+        max_control_points: 32
+        max_recovery_rank: 32
+        max_basis_orthogonality_error: 1.0e-6
 
 
 ### EvalutaionParams ###

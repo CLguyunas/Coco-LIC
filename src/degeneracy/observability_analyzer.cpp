@@ -208,6 +208,15 @@ namespace cocolic
     casr_shadow_evaluator_.Configure(casr_config);
     casr_shadow_enabled_ = casr_shadow_evaluator_.Enabled();
 
+    const YAML::Node intervention_node =
+        node ? node["casr_intervention"] : YAML::Node();
+    const CasrInterventionConfig requested_intervention_config =
+        ReadCasrInterventionConfig(intervention_node);
+    casr_intervention_config_ = requested_intervention_config;
+    casr_intervention_config_.enabled =
+        requested_intervention_config.enabled && enabled_ &&
+        casr_shadow_enabled_ && casr_config.scheduler_enabled;
+
     degeneracy_hysteresis_.Configure(
         enter_relative_eigenvalue_threshold_,
         exit_relative_eigenvalue_threshold_, enter_consecutive_scans_,
@@ -247,6 +256,13 @@ namespace cocolic
     {
       std::cerr << "[CASR-Shadow] disabled because support_enabled is "
                    "false.\n";
+    }
+    if (requested_intervention_config.enabled &&
+        !casr_intervention_config_.enabled)
+    {
+      std::cerr << "[CASR-Intervention] disabled: DSO diagnostics, "
+                   "CASR shadow, support analysis, and the activation "
+                   "scheduler must all be enabled.\n";
     }
     if (casr_requested && casr_node["support_pose_relative_threshold"] &&
         !casr_node["support_basis_relative_singular_threshold"])
@@ -305,6 +321,23 @@ namespace cocolic
       }
     }
 
+    intervention_csv_path_ = output_prefix + "_casr_intervention.csv";
+    if (casr_intervention_config_.enabled &&
+        casr_intervention_config_.output_csv)
+    {
+      intervention_csv_stream_.open(intervention_csv_path_,
+                                    std::ios::out | std::ios::trunc);
+      if (!intervention_csv_stream_.is_open())
+      {
+        std::cerr << "[CASR-Intervention] Cannot open CSV: "
+                  << intervention_csv_path_ << ".\n";
+      }
+      else
+      {
+        WriteInterventionCsvHeader();
+      }
+    }
+
     std::cout << "[DSO-DetectOnly] enabled | min_corr="
               << min_correspondences_ << " | hard_threshold="
               << relative_eigenvalue_threshold_ << " | enter/exit="
@@ -351,11 +384,33 @@ namespace cocolic
       }
       std::cout << ")";
     }
+    std::cout << " | casr_intervention="
+              << casr_intervention_config_.enabled;
+    if (casr_intervention_config_.enabled)
+    {
+      std::cout << "(" << kCasrInterventionMethodVersion
+                << ",apply="
+                << casr_intervention_config_.apply_to_estimator
+                << ",base_information="
+                << casr_intervention_config_.base_information_weight
+                << ",max_effective_information="
+                << casr_intervention_config_
+                       .max_effective_information_weight
+                << ",activation="
+                << casr_intervention_config_.min_activation_strength
+                << "-"
+                << casr_intervention_config_.max_activation_strength
+                << ")";
+    }
     std::cout << " | csv="
               << (csv_stream_.is_open() ? csv_path_ : std::string("disabled"))
               << " | casr_csv="
               << (casr_csv_stream_.is_open()
                       ? casr_csv_path_
+                      : std::string("disabled"))
+              << " | intervention_csv="
+              << (intervention_csv_stream_.is_open()
+                      ? intervention_csv_path_
                       : std::string("disabled"))
               << std::endl;
   }
@@ -376,6 +431,11 @@ namespace cocolic
     {
       casr_csv_stream_.flush();
       casr_csv_stream_.close();
+    }
+    if (intervention_csv_stream_.is_open())
+    {
+      intervention_csv_stream_.flush();
+      intervention_csv_stream_.close();
     }
   }
 
@@ -445,14 +505,16 @@ namespace cocolic
     if (casr_shadow_enabled_)
     {
       last_casr_result_ = AnalyzeCasr(
-          last_result_, last_result_, &real_casr_temporal_state_);
+          last_result_, last_result_, &real_casr_temporal_state_,
+          CasrDataSource::RealMeasurements);
       last_injected_casr_result_ = CasrShadowResult();
       const CasrShadowResult *injected_casr = nullptr;
       if (support_injection_enabled_)
       {
         last_injected_casr_result_ = AnalyzeCasr(
             last_result_, last_injection_result_.injected_support,
-            &injected_casr_temporal_state_);
+            &injected_casr_temporal_state_,
+            CasrDataSource::DiagnosticsCopy);
         injected_casr = &last_injected_casr_result_;
       }
       WriteCasrCsvRow(scan_timestamp_ns, last_result_, last_casr_result_,
@@ -1251,9 +1313,11 @@ namespace cocolic
   CasrShadowResult ObservabilityAnalyzer::AnalyzeCasr(
       const ObservabilityResult &environment_result,
       const ObservabilityResult &support_result,
-      CasrTemporalState *temporal_state) const
+      CasrTemporalState *temporal_state,
+      CasrDataSource data_source) const
   {
     CasrShadowInput input;
+    input.data_source = data_source;
     input.environment_valid = environment_result.valid;
     input.support_valid = support_result.support_valid;
     input.environment_state = environment_result.degenerate_state;
@@ -1554,6 +1618,86 @@ namespace cocolic
     write_block_header("injected_");
     casr_csv_stream_ << '\n';
     casr_csv_stream_.flush();
+  }
+
+  void ObservabilityAnalyzer::WriteInterventionCsvHeader()
+  {
+    if (!intervention_csv_stream_.is_open())
+    {
+      return;
+    }
+    intervention_csv_stream_
+        << "scan_timestamp_s,method_version,state_code,state,enabled,"
+           "apply_to_estimator,eligible,factor_added,applied,"
+           "data_source_code,route_code,route,"
+           "control_point_start_index,control_point_num,recovery_rank,"
+           "requested_activation_strength,used_activation_strength,"
+           "characteristic_range,base_information_weight,"
+           "max_effective_information_weight,"
+           "effective_information_weight,sqrt_information_weight,"
+           "pre_total_increment_norm,pre_projected_increment_norm,"
+           "pre_orthogonal_increment_norm,pre_factor_residual_norm,"
+           "post_total_increment_norm,post_projected_increment_norm,"
+           "post_orthogonal_increment_norm,post_factor_residual_norm,"
+           "max_rotation_increment_rad,max_translation_increment_m,"
+           "solver_usable,solver_successful_steps,"
+           "solver_unsuccessful_steps,primary_solver_usable,"
+           "primary_solver_successful_steps,"
+           "primary_solver_unsuccessful_steps,fallback_attempted,"
+           "fallback_solver_usable\n";
+    intervention_csv_stream_.flush();
+  }
+
+  void ObservabilityAnalyzer::LogCasrIntervention(
+      const CasrInterventionReport &report)
+  {
+    if (!intervention_csv_stream_.is_open())
+    {
+      return;
+    }
+    intervention_csv_stream_
+        << std::setprecision(12)
+        << report.scan_timestamp_ns * Trajectory::NS_TO_S << ','
+        << kCasrInterventionMethodVersion << ','
+        << static_cast<int>(report.state) << ','
+        << CasrInterventionStateName(report.state) << ','
+        << static_cast<int>(report.enabled) << ','
+        << static_cast<int>(report.apply_to_estimator) << ','
+        << static_cast<int>(report.eligible) << ','
+        << static_cast<int>(report.factor_added) << ','
+        << static_cast<int>(report.applied) << ','
+        << static_cast<int>(report.data_source) << ','
+        << static_cast<int>(report.route) << ','
+        << CasrRouteName(report.route) << ','
+        << report.control_point_start_index << ','
+        << report.control_point_num << ','
+        << report.recovery_rank << ','
+        << report.requested_activation_strength << ','
+        << report.used_activation_strength << ','
+        << report.characteristic_range << ','
+        << report.base_information_weight << ','
+        << report.max_effective_information_weight << ','
+        << report.effective_information_weight << ','
+        << report.sqrt_information_weight << ','
+        << report.pre_total_increment_norm << ','
+        << report.pre_projected_increment_norm << ','
+        << report.pre_orthogonal_increment_norm << ','
+        << report.pre_factor_residual_norm << ','
+        << report.post_total_increment_norm << ','
+        << report.post_projected_increment_norm << ','
+        << report.post_orthogonal_increment_norm << ','
+        << report.post_factor_residual_norm << ','
+        << report.max_rotation_increment_rad << ','
+        << report.max_translation_increment_m << ','
+        << static_cast<int>(report.solver_usable) << ','
+        << report.solver_successful_steps << ','
+        << report.solver_unsuccessful_steps << ','
+        << static_cast<int>(report.primary_solver_usable) << ','
+        << report.primary_solver_successful_steps << ','
+        << report.primary_solver_unsuccessful_steps << ','
+        << static_cast<int>(report.fallback_attempted) << ','
+        << static_cast<int>(report.fallback_solver_usable) << '\n';
+    intervention_csv_stream_.flush();
   }
 
   void ObservabilityAnalyzer::WriteCasrCsvRow(

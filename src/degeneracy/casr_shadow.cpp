@@ -918,6 +918,7 @@ namespace cocolic
       CasrTemporalState *temporal_state) const
   {
     CasrShadowResult result;
+    result.data_source = input.data_source;
     const auto invalid_result = [&]()
     {
       if (temporal_state)

@@ -9,14 +9,19 @@ It records two different sources of weakness:
    timestamps sufficiently excite the active trajectory control-point modes.
 
 The two spaces are kept separate so that a tunnel-like scene is not
-automatically confused with poor temporal/control-point support. The analyzer
-does **not** change:
+automatically confused with poor temporal/control-point support. The analyzer,
+injector, CASR router, and scheduler do **not** change:
 
 - Ceres residual blocks or weights;
 - LiDAR, IMU, or camera fusion;
 - non-uniform B-spline control points;
 - keyframes or the local map;
 - marginalization factors or priors.
+
+Stage 5 adds a separate CASR intervention component. It is disabled for
+estimator writes unless both `casr_intervention.enabled` and
+`casr_intervention.apply_to_estimator` are true. Keeping `enabled: true` and
+`apply_to_estimator: false` produces a dry-run audit without changing Ceres.
 
 ## Enable
 
@@ -65,14 +70,41 @@ dso_detect_only:
         route_consecutive_scans: 3
         projector_consecutive_scans: 3
         projector_similarity_threshold: 8.0e-1
+        activation_scheduler:
+            enabled: true
+            environment_full_confidence_threshold: 3.0e-3
+            environment_zero_confidence_threshold: 6.0e-3
+            support_full_confidence_threshold: 2.0e-2
+            support_zero_confidence_threshold: 5.0e-2
+            projector_full_confidence: 9.5e-1
+            principal_full_confidence: 9.0e-1
+            persistence_full_scans: 5
+            enter_confidence: 2.5e-1
+            exit_confidence: 1.0e-1
+            rise_time_s: 5.0e-1
+            fall_time_s: 2.0e-1
+            max_dt_s: 5.0e-1
+    casr_intervention:
+        enabled: true
+        apply_to_estimator: false
+        output_csv: true
+        base_information_weight: 1.0
+        max_effective_information_weight: 1.0e+2
+        min_activation_strength: 5.0e-2
+        max_activation_strength: 1.0
+        max_control_points: 32
+        max_recovery_rank: 32
+        max_basis_orthogonality_error: 1.0e-6
 ```
 
 When the block is absent or `enabled` is `false`, no analysis is performed.
 Setting only `support_enabled: false` preserves the environment-space detector.
 The controlled injector is off by default and additionally requires
 `diagnostics_only: true`; the implementation refuses any other setting.
-CASR is also restricted to `shadow_only: true` in this stage. It emits a
-candidate projector but cannot add a residual, prior, or estimator weight.
+The CASR evaluator remains restricted to `shadow_only: true`: it emits a
+candidate basis and scheduler strength but has no estimator write path. The
+separate Stage-5 intervention revalidates that output before it may add one
+ephemeral factor.
 
 ## Output
 
@@ -349,9 +381,9 @@ temporal states.
 ### Cause-aware pre-intervention scheduler
 
 The Stage-4 scheduler remains inside the shadow evaluator. It does not add a
-factor, alter a residual, or expose a write path to the estimator. Its purpose
-is to turn a binary `recovery_ready` event into an auditable continuous
-candidate strength before estimator intervention is attempted.
+factor or alter a residual. Its purpose is to turn a binary `recovery_ready`
+event into an auditable continuous candidate strength. Stage 5 may consume
+only the real-data scheduler result after repeating every safety check.
 
 Four confidence terms are computed in `[0, 1]`:
 
@@ -405,12 +437,100 @@ target strength, slewed activation strength, and elapsed time. The original
 
 `CASR-Shadow` still does not modify Ceres, the spline, measurements, the map,
 or the marginalization prior. A configuration with `shadow_only: false` is
-refused. Therefore this stage validates the proposed knot-space direction
-selection and stability mechanism, not trajectory recovery performance.
+refused. Its output is consumed only by the separately armed intervention
+described next.
+
+## Stage 5: CASR estimator intervention
+
+The intervention implements an anisotropic soft anchor in the exact `6K`
+knot space. Immediately after IMU propagation and before the LIC iterations,
+it copies only the recent control-point suffix. If the final-iteration CASR
+result is valid, schedulable, route-consistent, `recovery_ready`, active, and
+numerically well formed, the factor uses the pre-LIC control points as its
+reference. For each covered control point it forms
+
+```text
+delta = [r*Log(R_reference^-1 R_current),
+         p_current - p_reference].
+```
+
+For the orthonormal recovery basis `B_r`, the residual is
+
+```text
+effective_information = min(max_effective_information_weight,
+                            base_information_weight * activation_strength)
+residual = sqrt(effective_information)
+           * B_r^T delta.
+```
+
+Therefore only the diagnosed recovery coordinates are damped. Updates in the
+orthogonal, observable complement remain unconstrained by this factor. The
+SO(3) Jacobian uses the exact right-Jacobian inverse corresponding to Coco-LIC's
+right perturbation. The factor is added only to the final LIC refinement and
+is never inserted into `UpdateLICPrior`; a transient diagnosis cannot pollute
+the long-lived marginalization prior.
+
+The intervention repeats the following hard gates independently of the
+scheduler: valid CASR input, one of the three schedulable routes, raw/stable
+route agreement, `recovery_ready`, active scheduler, activation floor, finite
+orthonormal basis, configured rank/dimension bounds, current control-point
+range, an explicit `RealMeasurements` provenance tag, and an exact
+timestamp-matched pre-LIC reference. `inactive`, `coupled_conflict`, stale
+routes, diagnostics-copy results, or missing references always produce zero
+estimator factors. The provenance check is repeated at the estimator boundary;
+it does not rely only on the caller selecting the real result.
+
+Before an armed solve, every parameter block registered in the final Ceres
+problem is snapshotted. If the CASR solve is unusable, the code restores all
+control points and jointly optimized states, removes the CASR residual, and
+retries the same final LIC solve without intervention. If that fallback also
+fails, the pre-final-iteration state is restored again. Thus a failed CASR
+attempt is never committed silently.
+
+With `casr_intervention.enabled: true`, a fourth audit file is written:
+
+```text
+config/data/degenerate_seq_02_casr_intervention.csv
+```
+
+Its `state` distinguishes safety blocks, `dry_run`, `applied`, recovered
+solver failure, and unrecovered solver failure. It records source provenance,
+requested/used activation, effective information, control-point range/rank,
+factor-added/committed flags, primary/fallback solver status, and the total,
+projected, and orthogonal scaled increments before and after the final solve.
+`pre/post_factor_residual_norm` allows direct A/B verification that the armed
+factor actually suppresses the selected component rather than merely changing
+the trajectory elsewhere.
+
+Use the two-switch sequence deliberately:
+
+1. `enabled: true`, `apply_to_estimator: false`: dry-run eligibility and
+   increment audit; the trajectory must remain within repeated shadow-only
+   variation;
+2. `enabled: true`, `apply_to_estimator: true`: armed run, initially with
+   `base_information_weight: 1.0`;
+3. compare OFF, dry-run, and armed repeats before sweeping the single
+   information weight. Never tune detector thresholds and intervention weight
+   simultaneously.
+
+Audit one run, or align a dry-run and armed run by scan timestamp, with:
+
+```shell
+python3 tools/analyze_casr_intervention.py \
+  --run dry=config/data/sequence_dry_casr_intervention.csv \
+  --run armed=config/data/sequence_armed_casr_intervention.csv
+```
+
+The command exits nonzero for source leakage, inconsistent factor/commit
+flags, a factor added while `apply_to_estimator` is false, non-finite metrics,
+or invalid fallback-state combinations. It also reports median and p90
+post/pre ratios for the diagnosed projection and its orthogonal complement.
 
 ## Baseline non-interference check
 
-Run the same bag twice, changing only `enabled`:
+For detector/shadow non-interference, keep
+`casr_intervention.apply_to_estimator: false` and run the same bag twice,
+changing only detector `enabled`:
 
 1. `enabled: false`
 2. `enabled: true`
@@ -477,6 +597,7 @@ high-confidence environment segments should ramp smoothly instead of jumping
 from zero to full strength.
 Use at least five repeated detector-OFF and shadow-ON runs to report ATE/RPE
 mean and standard deviation; two extrema alone are not a non-interference
-test. This still does not validate recovery accuracy. Estimator intervention
-remains a later stage and must be evaluated separately with cause-specific
-ATE/RPE and consistency metrics.
+test. This validates only the shadow and dry-run paths. Armed intervention
+must be evaluated separately with repeated OFF/dry-run/armed trajectories,
+cause-specific ATE/RPE, projected-increment suppression, solver failures,
+runtime, and non-degenerate-sequence regression checks.

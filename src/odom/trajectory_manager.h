@@ -17,6 +17,7 @@
  */
 
 #pragma once
+#include <degeneracy/casr_intervention.h>
 #include <odom/trajectory_estimator.h>
 #include <imu/imu_state_estimator.h>
 #include <spline/trajectory.h>
@@ -140,7 +141,20 @@ namespace cocolic
         const Eigen::aligned_vector<PointCorrespondence> &point_corrs,
         const Eigen::aligned_vector<Eigen::Vector3d> &pnp_3ds,
         const Eigen::aligned_vector<Eigen::Vector2d> &pnp_2ds,
-        const int iteration = 50);
+        const int iteration = 50,
+        const CasrShadowResult *casr_result = nullptr,
+        double casr_characteristic_range = 1.0,
+        int64_t casr_scan_timestamp_ns = -1);
+
+    void ConfigureCasrIntervention(
+        const CasrInterventionConfig &config);
+
+    void CaptureCasrInterventionReference(int64_t scan_timestamp_ns);
+
+    const CasrInterventionReport &LastCasrInterventionReport() const
+    {
+      return last_casr_intervention_report_;
+    }
 
     void UpdateLiDARAttribute(double scan_time_min, double scan_time_max);
 
@@ -224,6 +238,29 @@ namespace cocolic
 
     void InitTrajWithPropagation();
 
+    struct CasrReferenceSnapshot
+    {
+      bool valid = false;
+      int64_t scan_timestamp_ns = 0;
+      int control_point_start_index = -1;
+      Eigen::aligned_vector<SO3d> rotations;
+      Eigen::aligned_vector<Eigen::Vector3d> positions;
+    };
+
+    bool ExtractCasrReference(
+        const CasrInterventionPlan &plan,
+        int64_t scan_timestamp_ns,
+        Eigen::aligned_vector<SO3d> &reference_rotations,
+        Eigen::aligned_vector<Eigen::Vector3d> &reference_positions) const;
+
+    void MeasureCasrIncrement(
+        const CasrInterventionPlan &plan,
+        const Eigen::MatrixXd &recovery_basis,
+        const Eigen::aligned_vector<SO3d> &reference_rotations,
+        const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
+        bool post_solve,
+        CasrInterventionReport &report) const;
+
     void TranfromTraj4DoF(double t_min, double t_max, const Eigen::Matrix3d &R0,
                           const Eigen::Vector3d &t0, bool apply = true);
 
@@ -281,6 +318,10 @@ namespace cocolic
     Eigen::aligned_vector<Eigen::Vector2d> px_obss_;
 
     Eigen::Matrix3d K_;
+
+    CasrInterventionConfig casr_intervention_config_;
+    CasrReferenceSnapshot casr_reference_snapshot_;
+    CasrInterventionReport last_casr_intervention_report_;
 
   public:
     void ClearVisual()

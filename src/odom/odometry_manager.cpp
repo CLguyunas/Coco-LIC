@@ -124,10 +124,13 @@ namespace cocolic
     is_evo_viral_ = node["is_evo_viral"].as<bool>();
     CreateCacheFolder(config_path, msg_manager_->bag_path_);
 
-    // DSO-DetectOnly reads LiDAR correspondences and the current trajectory,
-    // but never changes optimization factors, weights, the map, or priors.
+    // DSO, support analysis, injection, CASR routing, and scheduling are
+    // read-only. Only the separately armed CASR intervention can add its
+    // non-marginalized final-iteration factor.
     observability_analyzer_ = std::make_shared<ObservabilityAnalyzer>(
         node["dso_detect_only"], trajectory_, cache_path_);
+    trajectory_manager_->ConfigureCasrIntervention(
+        observability_analyzer_->InterventionConfig());
 
     // gaussian-lic
     if_3dgs_ = node["if_3dgs"].as<bool>();
@@ -348,33 +351,57 @@ namespace cocolic
     }
 
     /// [5] finely optimize trajectory based on prior、lidar、imu、camera
+    // Keep an IMU-propagated, pre-LIC reference for a possible CASR factor.
+    // Only a short suffix of control points is copied, and the operation is a
+    // no-op while CASR intervention is disabled.
+    trajectory_manager_->CaptureCasrInterventionReference(
+        msg.lidar_timestamp);
     for (int iter = 0; iter < lidar_iter_; ++iter)
     {
       lidar_handler_->GetLoamFeatureAssociation();
 
-      // Log the association produced immediately before the final LIC update.
-      // This call is deliberately read-only so detector enable/disable cannot
-      // alter the optimized trajectory.
+      const CasrShadowResult *casr_result = nullptr;
+      double casr_characteristic_range = 1.0;
+
+      // Analyze the association produced immediately before the final LIC
+      // update. The analyzer itself remains read-only. A separate, explicitly
+      // armed CASR intervention may consume its audited real-data result.
       if (observability_analyzer_ && observability_analyzer_->Enabled() &&
           iter == lidar_iter_ - 1)
       {
-        observability_analyzer_->AnalyzeAndLog(
-            msg.lidar_timestamp,
-            lidar_handler_->GetPointCorrespondence());
+        const ObservabilityResult &observability =
+            observability_analyzer_->AnalyzeAndLog(
+                msg.lidar_timestamp,
+                lidar_handler_->GetPointCorrespondence());
+        if (observability.scan_timestamp_ns == msg.lidar_timestamp)
+        {
+          casr_result = &observability_analyzer_->LastCasrResult();
+          casr_characteristic_range =
+              observability.characteristic_range;
+        }
       }
 
       if (process_image)
       {
         trajectory_manager_->UpdateTrajectoryWithLIC(
             iter, msg.image_timestamp,
-            lidar_handler_->GetPointCorrespondence(), v_points_, px_obss_, 8);
+            lidar_handler_->GetPointCorrespondence(), v_points_, px_obss_, 8,
+            casr_result, casr_characteristic_range,
+            msg.lidar_timestamp);
       }
       else
       {
         trajectory_manager_->UpdateTrajectoryWithLIC(
             iter, msg.image_timestamp,
-            lidar_handler_->GetPointCorrespondence(), {}, {}, 8);
+            lidar_handler_->GetPointCorrespondence(), {}, {}, 8,
+            casr_result, casr_characteristic_range,
+            msg.lidar_timestamp);
         trajectory_manager_->SetProcessCurImg(false);
+      }
+      if (casr_result && observability_analyzer_)
+      {
+        observability_analyzer_->LogCasrIntervention(
+            trajectory_manager_->LastCasrInterventionReport());
       }
     }
     PublishCloudAndTrajectory();

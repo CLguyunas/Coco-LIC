@@ -137,6 +137,20 @@ namespace cocolic
     EXPECT_TRUE(third.recovery_ready);
   }
 
+  TEST(CasrShadowProvenance, PreservesDiagnosticsCopyOnInvalidInput)
+  {
+    CasrShadowConfig config;
+    config.enabled = true;
+    CasrShadowEvaluator evaluator;
+    evaluator.Configure(config);
+    CasrShadowInput input;
+    input.data_source = CasrDataSource::DiagnosticsCopy;
+
+    const CasrShadowResult result = evaluator.Evaluate(input, nullptr);
+    EXPECT_FALSE(result.valid);
+    EXPECT_EQ(result.data_source, CasrDataSource::DiagnosticsCopy);
+  }
+
   TEST(CasrShadowTemporalGate, RejectsDisjointGlobalKnotWindows)
   {
     CasrShadowConfig config;

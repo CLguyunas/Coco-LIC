@@ -34,6 +34,7 @@
 #include <odom/factor/analytic_diff/image_feature_factor.h>
 #include <odom/factor/analytic_diff/lidar_feature_factor.h>
 #include <odom/factor/analytic_diff/marginalization_factor.h>
+#include <odom/factor/analytic_diff/casr_subspace_factor.h>
 #include <odom/factor/analytic_diff/trajectory_value_factor.h>
 
 namespace cocolic
@@ -268,6 +269,29 @@ namespace cocolic
     void AddMarginalizationFactor(
         MarginalizationInfo::Ptr &last_marginalization_info,
         std::vector<double *> &last_marginalization_parameter_blocks);
+
+    ceres::ResidualBlockId AddCasrSubspaceIntervention(
+        int control_point_start_index,
+        const Eigen::MatrixXd &recovery_basis,
+        const Eigen::aligned_vector<SO3d> &reference_rotations,
+        const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
+        double characteristic_range,
+        double sqrt_information_weight);
+
+    struct ParameterBlockSnapshot
+    {
+      double *data = nullptr;
+      std::vector<double> values;
+    };
+
+    using ParameterSnapshot = std::vector<ParameterBlockSnapshot>;
+
+    ParameterSnapshot CaptureParameterSnapshot() const;
+
+    bool RestoreParameterSnapshot(
+        const ParameterSnapshot &snapshot) const;
+
+    bool RemoveResidualBlock(ceres::ResidualBlockId residual_block_id);
 
     void AddPoseMeasurementAutoDiff(const PoseData &pose_data, double pos_weight,
                                     double rot_weight);

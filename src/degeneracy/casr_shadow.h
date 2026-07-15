@@ -3,9 +3,9 @@
  *
  * CASR-v2 compares the environment and spline-support weak directions in the
  * active 6K control-point space. The evaluator constructs candidate knot-space
- * recovery bases, but never applies them to the estimator. Estimator
- * integration is deliberately kept outside this stage until the bases and the
- * temporal gate have been validated from logs.
+ * recovery bases, but never applies them to the estimator. The separate
+ * Stage-5 intervention owns the only estimator write path and must revalidate
+ * the source, basis, temporal gate, and control-point range independently.
  */
 
 #pragma once
@@ -39,6 +39,12 @@ namespace cocolic
   using CasrVector6 = Eigen::Matrix<double, 6, 1>;
   using CasrMatrix6 = Eigen::Matrix<double, 6, 6>;
 
+  enum class CasrDataSource : int
+  {
+    RealMeasurements = 0,
+    DiagnosticsCopy = 1
+  };
+
   struct CasrShadowConfig
   {
     bool enabled = false;
@@ -50,9 +56,10 @@ namespace cocolic
     int projector_consecutive_scans = 3;
     double projector_similarity_threshold = 8e-1;
 
-    // Stage-4 intervention scheduler remains shadow-only. It converts a
-    // binary recovery_ready decision into an auditable, cause-aware,
-    // time-continuous candidate strength, but never writes estimator state.
+    // Stage-4 scheduler remains read-only. It converts a binary
+    // recovery_ready decision into an auditable, cause-aware, time-continuous
+    // strength. A separate, explicitly armed Stage-5 component may consume
+    // the real-data result; the shadow evaluator itself never writes state.
     bool scheduler_enabled = false;
     double scheduler_environment_full_confidence_threshold = 3e-3;
     double scheduler_environment_zero_confidence_threshold = 6e-3;
@@ -70,6 +77,7 @@ namespace cocolic
 
   struct CasrShadowInput
   {
+    CasrDataSource data_source = CasrDataSource::RealMeasurements;
     bool environment_valid = false;
     bool support_valid = false;
     bool environment_state = false;
@@ -94,6 +102,7 @@ namespace cocolic
 
   struct CasrShadowResult
   {
+    CasrDataSource data_source = CasrDataSource::RealMeasurements;
     bool valid = false;
     int cause = -1;
     CasrRoute route = CasrRoute::Invalid;
@@ -113,8 +122,8 @@ namespace cocolic
     double recovery_basis_orthogonality_error = 0.0;
 
     // Raw cause routing remains visible. stable_route and recovery_ready are
-    // an independent shadow-only temporal gate; they are never consumed by
-    // Ceres or any estimator state in this stage.
+    // an independent shadow-only temporal gate; this stage never consumes
+    // them through Ceres or any estimator state.
     CasrRoute stable_route = CasrRoute::Invalid;
     int route_candidate_count = 0;
     double temporal_projector_similarity = 0.0;
@@ -126,8 +135,9 @@ namespace cocolic
     int projector_consistency_count = 0;
     bool recovery_ready = false;
 
-    // Shadow scheduler audit. activation_strength is a future intervention
-    // recommendation only and is never consumed by Ceres in this stage.
+    // Shadow scheduler audit. The evaluator never consumes this value. The
+    // separate CASR intervention layer may use it only after all safety gates
+    // are independently revalidated.
     CasrSchedulerState scheduler_state = CasrSchedulerState::Disabled;
     bool scheduler_eligible = false;
     bool scheduler_active = false;

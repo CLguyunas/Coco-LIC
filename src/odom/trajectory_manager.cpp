@@ -315,15 +315,194 @@ namespace cocolic
     //           << summary.num_unsuccessful_steps;
   }
 
+  void TrajectoryManager::ConfigureCasrIntervention(
+      const CasrInterventionConfig &config)
+  {
+    casr_intervention_config_ = config;
+    casr_reference_snapshot_ = CasrReferenceSnapshot();
+    last_casr_intervention_report_ = CasrInterventionReport();
+  }
+
+  void TrajectoryManager::CaptureCasrInterventionReference(
+      int64_t scan_timestamp_ns)
+  {
+    casr_reference_snapshot_ = CasrReferenceSnapshot();
+    if (!casr_intervention_config_.enabled || scan_timestamp_ns < 0)
+    {
+      return;
+    }
+
+    const int trajectory_control_point_num =
+        static_cast<int>(trajectory_->numKnots());
+    if (trajectory_control_point_num <= 0)
+    {
+      return;
+    }
+    const int retained_control_point_num = std::min(
+        trajectory_control_point_num,
+        casr_intervention_config_.max_control_points + SplineOrder);
+    casr_reference_snapshot_.control_point_start_index =
+        trajectory_control_point_num - retained_control_point_num;
+    casr_reference_snapshot_.scan_timestamp_ns = scan_timestamp_ns;
+    casr_reference_snapshot_.rotations.reserve(
+        static_cast<size_t>(retained_control_point_num));
+    casr_reference_snapshot_.positions.reserve(
+        static_cast<size_t>(retained_control_point_num));
+    for (int i = 0; i < retained_control_point_num; ++i)
+    {
+      const size_t knot_index = static_cast<size_t>(
+          casr_reference_snapshot_.control_point_start_index + i);
+      casr_reference_snapshot_.rotations.emplace_back(
+          trajectory_->getKnotSO3(knot_index));
+      casr_reference_snapshot_.positions.emplace_back(
+          trajectory_->getKnotPos(knot_index));
+    }
+    casr_reference_snapshot_.valid = true;
+  }
+
+  bool TrajectoryManager::ExtractCasrReference(
+      const CasrInterventionPlan &plan,
+      int64_t scan_timestamp_ns,
+      Eigen::aligned_vector<SO3d> &reference_rotations,
+      Eigen::aligned_vector<Eigen::Vector3d> &reference_positions) const
+  {
+    reference_rotations.clear();
+    reference_positions.clear();
+    if (!casr_reference_snapshot_.valid ||
+        casr_reference_snapshot_.scan_timestamp_ns != scan_timestamp_ns ||
+        plan.control_point_start_index <
+            casr_reference_snapshot_.control_point_start_index)
+    {
+      return false;
+    }
+    const int local_start = plan.control_point_start_index -
+                            casr_reference_snapshot_.control_point_start_index;
+    if (local_start < 0 ||
+        local_start + plan.control_point_num >
+            static_cast<int>(casr_reference_snapshot_.rotations.size()) ||
+        local_start + plan.control_point_num >
+            static_cast<int>(casr_reference_snapshot_.positions.size()))
+    {
+      return false;
+    }
+
+    reference_rotations.reserve(static_cast<size_t>(plan.control_point_num));
+    reference_positions.reserve(static_cast<size_t>(plan.control_point_num));
+    for (int i = 0; i < plan.control_point_num; ++i)
+    {
+      reference_rotations.emplace_back(
+          casr_reference_snapshot_.rotations[
+              static_cast<size_t>(local_start + i)]);
+      reference_positions.emplace_back(
+          casr_reference_snapshot_.positions[
+              static_cast<size_t>(local_start + i)]);
+    }
+    return true;
+  }
+
+  void TrajectoryManager::MeasureCasrIncrement(
+      const CasrInterventionPlan &plan,
+      const Eigen::MatrixXd &recovery_basis,
+      const Eigen::aligned_vector<SO3d> &reference_rotations,
+      const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
+      bool post_solve,
+      CasrInterventionReport &report) const
+  {
+    if (plan.control_point_num <= 0 || plan.recovery_rank <= 0 ||
+        recovery_basis.rows() != 6 * plan.control_point_num ||
+        recovery_basis.cols() != plan.recovery_rank ||
+        static_cast<int>(reference_rotations.size()) !=
+            plan.control_point_num ||
+        static_cast<int>(reference_positions.size()) !=
+            plan.control_point_num)
+    {
+      return;
+    }
+
+    Eigen::VectorXd scaled_increment =
+        Eigen::VectorXd::Zero(6 * plan.control_point_num);
+    double max_rotation_increment_rad = 0.0;
+    double max_translation_increment_m = 0.0;
+    for (int i = 0; i < plan.control_point_num; ++i)
+    {
+      const size_t knot_index = static_cast<size_t>(
+          plan.control_point_start_index + i);
+      const Eigen::Vector3d rotation_increment =
+          (reference_rotations[static_cast<size_t>(i)].inverse() *
+           trajectory_->getKnotSO3(knot_index))
+              .log();
+      const Eigen::Vector3d translation_increment =
+          trajectory_->getKnotPos(knot_index) -
+          reference_positions[static_cast<size_t>(i)];
+      scaled_increment.segment<3>(6 * i) =
+          plan.characteristic_range * rotation_increment;
+      scaled_increment.segment<3>(6 * i + 3) = translation_increment;
+      max_rotation_increment_rad = std::max(
+          max_rotation_increment_rad, rotation_increment.norm());
+      max_translation_increment_m = std::max(
+          max_translation_increment_m, translation_increment.norm());
+    }
+
+    const Eigen::VectorXd projected_coordinates =
+        recovery_basis.transpose() * scaled_increment;
+    const Eigen::VectorXd orthogonal_increment =
+        scaled_increment - recovery_basis * projected_coordinates;
+    const double total_norm = scaled_increment.norm();
+    const double projected_norm = projected_coordinates.norm();
+    const double orthogonal_norm = orthogonal_increment.norm();
+    const double factor_residual_norm =
+        plan.sqrt_information_weight * projected_norm;
+    if (post_solve)
+    {
+      report.post_total_increment_norm = total_norm;
+      report.post_projected_increment_norm = projected_norm;
+      report.post_orthogonal_increment_norm = orthogonal_norm;
+      report.post_factor_residual_norm = factor_residual_norm;
+      report.max_rotation_increment_rad = max_rotation_increment_rad;
+      report.max_translation_increment_m = max_translation_increment_m;
+    }
+    else
+    {
+      report.pre_total_increment_norm = total_norm;
+      report.pre_projected_increment_norm = projected_norm;
+      report.pre_orthogonal_increment_norm = orthogonal_norm;
+      report.pre_factor_residual_norm = factor_residual_norm;
+    }
+  }
+
   bool TrajectoryManager::UpdateTrajectoryWithLIC(
       int lidar_iter, int64_t img_time_stamp,
       const Eigen::aligned_vector<PointCorrespondence> &point_corrs,
       const Eigen::aligned_vector<Eigen::Vector3d> &pnp_3ds,
       const Eigen::aligned_vector<Eigen::Vector2d> &pnp_2ds,
-      const int iteration)
+      const int iteration,
+      const CasrShadowResult *casr_result,
+      double casr_characteristic_range,
+      int64_t casr_scan_timestamp_ns)
   {
+    last_casr_intervention_report_ = CasrInterventionReport();
+    last_casr_intervention_report_.enabled =
+        casr_intervention_config_.enabled;
+    last_casr_intervention_report_.apply_to_estimator =
+        casr_intervention_config_.apply_to_estimator;
+    last_casr_intervention_report_.scan_timestamp_ns =
+        std::max<int64_t>(0, casr_scan_timestamp_ns);
+    last_casr_intervention_report_.base_information_weight =
+        casr_intervention_config_.base_information_weight;
+    last_casr_intervention_report_.max_effective_information_weight =
+        casr_intervention_config_.max_effective_information_weight;
     if (point_corrs.empty() || imu_data_.empty() || imu_data_.size() == 1)
     {
+      if (casr_result)
+      {
+        last_casr_intervention_report_.route = casr_result->route;
+        last_casr_intervention_report_.data_source =
+            casr_result->data_source;
+        last_casr_intervention_report_.state =
+            casr_intervention_config_.enabled
+                ? CasrInterventionState::InvalidInput
+                : CasrInterventionState::Disabled;
+      }
       // LOG(WARNING) << " input empty data " << point_corrs.size() << ", "
       //              << imu_data_.size();
       return false;
@@ -452,9 +631,150 @@ namespace cocolic
       process_cur_img_ = false;
     }
 
+    CasrInterventionPlan casr_plan;
+    ceres::ResidualBlockId casr_residual_block_id = nullptr;
+    TrajectoryEstimator::ParameterSnapshot casr_rollback_snapshot;
+    Eigen::aligned_vector<SO3d> casr_reference_rotations;
+    Eigen::aligned_vector<Eigen::Vector3d> casr_reference_positions;
+    if (casr_result)
+    {
+      casr_plan = BuildCasrInterventionPlan(
+          casr_intervention_config_, *casr_result,
+          casr_characteristic_range,
+          static_cast<int>(trajectory_->numKnots()));
+      last_casr_intervention_report_.state = casr_plan.state;
+      last_casr_intervention_report_.eligible = casr_plan.eligible;
+      last_casr_intervention_report_.route = casr_result->route;
+      last_casr_intervention_report_.data_source = casr_result->data_source;
+      last_casr_intervention_report_.control_point_start_index =
+          casr_plan.control_point_start_index;
+      last_casr_intervention_report_.control_point_num =
+          casr_plan.control_point_num;
+      last_casr_intervention_report_.recovery_rank =
+          casr_plan.recovery_rank;
+      last_casr_intervention_report_.requested_activation_strength =
+          casr_plan.requested_activation_strength;
+      last_casr_intervention_report_.used_activation_strength =
+          casr_plan.used_activation_strength;
+      last_casr_intervention_report_.characteristic_range =
+          casr_plan.characteristic_range;
+      last_casr_intervention_report_.effective_information_weight =
+          casr_plan.effective_information_weight;
+      last_casr_intervention_report_.sqrt_information_weight =
+          casr_plan.sqrt_information_weight;
+
+      if (casr_plan.eligible)
+      {
+        if (!ExtractCasrReference(
+                casr_plan, casr_scan_timestamp_ns,
+                casr_reference_rotations, casr_reference_positions))
+        {
+          casr_plan.eligible = false;
+          last_casr_intervention_report_.eligible = false;
+          last_casr_intervention_report_.state =
+              CasrInterventionState::MissingReference;
+        }
+        else
+        {
+          MeasureCasrIncrement(
+              casr_plan, casr_result->recovery_knot_basis,
+              casr_reference_rotations, casr_reference_positions, false,
+              last_casr_intervention_report_);
+          if (casr_intervention_config_.apply_to_estimator)
+          {
+            casr_residual_block_id =
+                estimator->AddCasrSubspaceIntervention(
+                    casr_plan.control_point_start_index,
+                    casr_result->recovery_knot_basis,
+                    casr_reference_rotations, casr_reference_positions,
+                    casr_plan.characteristic_range,
+                    casr_plan.sqrt_information_weight);
+            last_casr_intervention_report_.factor_added =
+                casr_residual_block_id != nullptr;
+            last_casr_intervention_report_.applied =
+                last_casr_intervention_report_.factor_added;
+            if (!last_casr_intervention_report_.factor_added)
+            {
+              casr_plan.eligible = false;
+              last_casr_intervention_report_.eligible = false;
+              last_casr_intervention_report_.state =
+                  CasrInterventionState::InvalidBasis;
+            }
+          }
+        }
+      }
+    }
+
+    if (last_casr_intervention_report_.factor_added)
+    {
+      // Snapshot every Ceres parameter block, not only the CASR knots. If the
+      // armed solve is unusable, biases and all other jointly optimized state
+      // must be restored before retrying the same final LIC solve without the
+      // intervention factor.
+      casr_rollback_snapshot = estimator->CaptureParameterSnapshot();
+    }
+
     TicToc t_opt;
     static int loam_cnt = 0;
     ceres::Solver::Summary summary = estimator->Solve(iteration, false);
+    last_casr_intervention_report_.primary_solver_usable =
+        summary.IsSolutionUsable();
+    last_casr_intervention_report_.primary_solver_successful_steps =
+        summary.num_successful_steps;
+    last_casr_intervention_report_.primary_solver_unsuccessful_steps =
+        summary.num_unsuccessful_steps;
+
+    if (last_casr_intervention_report_.factor_added &&
+        !last_casr_intervention_report_.primary_solver_usable)
+    {
+      const bool restored =
+          estimator->RestoreParameterSnapshot(casr_rollback_snapshot);
+      const bool removed =
+          estimator->RemoveResidualBlock(casr_residual_block_id);
+      last_casr_intervention_report_.applied = false;
+      if (restored && removed)
+      {
+        last_casr_intervention_report_.fallback_attempted = true;
+        summary = estimator->Solve(iteration, false);
+        last_casr_intervention_report_.fallback_solver_usable =
+            summary.IsSolutionUsable();
+        if (!last_casr_intervention_report_.fallback_solver_usable)
+        {
+          // The fallback itself failed. Restore the pre-final-iteration state
+          // once more so neither failed solve is committed to the trajectory.
+          estimator->RestoreParameterSnapshot(casr_rollback_snapshot);
+        }
+        last_casr_intervention_report_.state =
+            last_casr_intervention_report_.fallback_solver_usable
+                ? CasrInterventionState::SolverFailureRecovered
+                : CasrInterventionState::SolverFailure;
+      }
+      else
+      {
+        last_casr_intervention_report_.state =
+            CasrInterventionState::SolverFailure;
+      }
+    }
+    last_casr_intervention_report_.solver_usable =
+        summary.IsSolutionUsable();
+    last_casr_intervention_report_.solver_successful_steps =
+        summary.num_successful_steps;
+    last_casr_intervention_report_.solver_unsuccessful_steps =
+        summary.num_unsuccessful_steps;
+    if (casr_result && casr_plan.eligible &&
+        !casr_reference_rotations.empty())
+    {
+      MeasureCasrIncrement(
+          casr_plan, casr_result->recovery_knot_basis,
+          casr_reference_rotations, casr_reference_positions, true,
+          last_casr_intervention_report_);
+      if (last_casr_intervention_report_.factor_added &&
+          !last_casr_intervention_report_.solver_usable)
+      {
+        last_casr_intervention_report_.state =
+            CasrInterventionState::SolverFailure;
+      }
+    }
     double opt_time = t_opt.toc();
     // LOG(INFO) << "[t_opt] " << opt_time << std::endl;
     // LOG(INFO) << "LoamSolver " << summary.BriefReport();

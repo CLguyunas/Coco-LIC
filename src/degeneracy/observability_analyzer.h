@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <degeneracy/casr_intervention.h>
 #include <degeneracy/casr_shadow.h>
 #include <degeneracy/degeneracy_hysteresis.h>
 #include <degeneracy/support_degradation_injector.h>
@@ -146,6 +147,13 @@ namespace cocolic
       return last_injected_casr_result_;
     }
 
+    const CasrInterventionConfig &InterventionConfig() const
+    {
+      return casr_intervention_config_;
+    }
+
+    void LogCasrIntervention(const CasrInterventionReport &report);
+
   private:
     ObservabilityResult Analyze(
         int64_t scan_timestamp_ns,
@@ -170,7 +178,8 @@ namespace cocolic
     CasrShadowResult AnalyzeCasr(
         const ObservabilityResult &environment_result,
         const ObservabilityResult &support_result,
-        CasrTemporalState *temporal_state) const;
+        CasrTemporalState *temporal_state,
+        CasrDataSource data_source) const;
 
     void WriteCsvHeader();
     void WriteCsvRow(const ObservabilityResult &result);
@@ -185,6 +194,7 @@ namespace cocolic
         const ObservabilityResult &original_result,
         const CasrShadowResult &real_result,
         const CasrShadowResult *injected_result);
+    void WriteInterventionCsvHeader();
     void PrintSummary(const ObservabilityResult &result) const;
 
   private:
@@ -222,6 +232,8 @@ namespace cocolic
     CasrTemporalState real_casr_temporal_state_;
     CasrTemporalState injected_casr_temporal_state_;
 
+    CasrInterventionConfig casr_intervention_config_;
+
     size_t scan_counter_ = 0;
     std::string csv_path_;
     std::ofstream csv_stream_;
@@ -229,6 +241,8 @@ namespace cocolic
     std::ofstream injection_csv_stream_;
     std::string casr_csv_path_;
     std::ofstream casr_csv_stream_;
+    std::string intervention_csv_path_;
+    std::ofstream intervention_csv_stream_;
     DegeneracyHysteresis degeneracy_hysteresis_;
     DegeneracyHysteresis support_hysteresis_;
     DegeneracyHysteresis injected_support_hysteresis_;
