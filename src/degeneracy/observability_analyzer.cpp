@@ -165,6 +165,46 @@ namespace cocolic
         casr_node, "projector_consecutive_scans", 3);
     casr_config.projector_similarity_threshold = ReadValue<double>(
         casr_node, "projector_similarity_threshold", 8e-1);
+    const YAML::Node scheduler_node =
+        casr_node ? casr_node["activation_scheduler"] : YAML::Node();
+    casr_config.scheduler_enabled = casr_config.enabled &&
+        ReadValue<bool>(scheduler_node, "enabled", true);
+    casr_config.scheduler_environment_full_confidence_threshold =
+        ReadValue<double>(
+            scheduler_node,
+            "environment_full_confidence_threshold",
+            enter_relative_eigenvalue_threshold_);
+    casr_config.scheduler_environment_zero_confidence_threshold =
+        ReadValue<double>(
+            scheduler_node,
+            "environment_zero_confidence_threshold",
+            exit_relative_eigenvalue_threshold_);
+    casr_config.scheduler_support_full_confidence_threshold =
+        ReadValue<double>(scheduler_node,
+                          "support_full_confidence_threshold",
+                          support_enter_quality_threshold_);
+    casr_config.scheduler_support_zero_confidence_threshold =
+        ReadValue<double>(scheduler_node,
+                          "support_zero_confidence_threshold",
+                          support_exit_quality_threshold_);
+    casr_config.scheduler_projector_full_confidence =
+        ReadValue<double>(scheduler_node,
+                          "projector_full_confidence", 9.5e-1);
+    casr_config.scheduler_principal_full_confidence =
+        ReadValue<double>(scheduler_node,
+                          "principal_full_confidence", 9e-1);
+    casr_config.scheduler_persistence_full_scans = ReadValue<int>(
+        scheduler_node, "persistence_full_scans", 5);
+    casr_config.scheduler_enter_confidence = ReadValue<double>(
+        scheduler_node, "enter_confidence", 2.5e-1);
+    casr_config.scheduler_exit_confidence = ReadValue<double>(
+        scheduler_node, "exit_confidence", 1e-1);
+    casr_config.scheduler_rise_time_s = ReadValue<double>(
+        scheduler_node, "rise_time_s", 5e-1);
+    casr_config.scheduler_fall_time_s = ReadValue<double>(
+        scheduler_node, "fall_time_s", 2e-1);
+    casr_config.scheduler_max_dt_s = ReadValue<double>(
+        scheduler_node, "max_dt_s", 5e-1);
     casr_shadow_evaluator_.Configure(casr_config);
     casr_shadow_enabled_ = casr_shadow_evaluator_.Enabled();
 
@@ -298,7 +338,18 @@ namespace cocolic
                 << ",projector_persistence="
                 << config.projector_consecutive_scans
                 << ",projector_similarity="
-                << config.projector_similarity_threshold << ")";
+                << config.projector_similarity_threshold
+                << ",scheduler=" << config.scheduler_enabled;
+      if (config.scheduler_enabled)
+      {
+        std::cout << ",scheduler_enter/exit="
+                  << config.scheduler_enter_confidence << "/"
+                  << config.scheduler_exit_confidence
+                  << ",scheduler_rise/fall_s="
+                  << config.scheduler_rise_time_s << "/"
+                  << config.scheduler_fall_time_s;
+      }
+      std::cout << ")";
     }
     std::cout << " | csv="
               << (csv_stream_.is_open() ? csv_path_ : std::string("disabled"))
@@ -1207,6 +1258,9 @@ namespace cocolic
     input.support_valid = support_result.support_valid;
     input.environment_state = environment_result.degenerate_state;
     input.support_state = support_result.support_degenerate_state;
+    input.scan_timestamp_s =
+        environment_result.scan_timestamp_ns * Trajectory::NS_TO_S;
+    input.support_quality_min = support_result.support_quality_min;
     input.environment_relative_eigenvalues =
         environment_result.relative_eigenvalues;
     input.environment_eigenvectors = environment_result.eigenvectors;
@@ -1480,7 +1534,21 @@ namespace cocolic
           << ',' << prefix << "temporal_forced_overlap_rank"
           << ',' << prefix << "temporal_projector_affinity"
           << ',' << prefix << "projector_consistency_count"
-          << ',' << prefix << "recovery_ready";
+          << ',' << prefix << "recovery_ready"
+          << ',' << prefix << "scheduler_state_code"
+          << ',' << prefix << "scheduler_state"
+          << ',' << prefix << "scheduler_eligible"
+          << ',' << prefix << "scheduler_active"
+          << ',' << prefix << "scheduler_environment_confidence"
+          << ',' << prefix << "scheduler_support_confidence"
+          << ',' << prefix << "scheduler_cause_confidence"
+          << ',' << prefix << "scheduler_temporal_confidence"
+          << ',' << prefix << "scheduler_persistence_confidence"
+          << ',' << prefix << "scheduler_principal_confidence"
+          << ',' << prefix << "scheduler_raw_confidence"
+          << ',' << prefix << "scheduler_target_strength"
+          << ',' << prefix << "scheduler_activation_strength"
+          << ',' << prefix << "scheduler_dt_s";
     };
     write_block_header("real_");
     write_block_header("injected_");
@@ -1563,7 +1631,21 @@ namespace cocolic
           << ',' << casr_result.temporal_forced_overlap_rank
           << ',' << casr_result.temporal_projector_affinity
           << ',' << casr_result.projector_consistency_count
-          << ',' << static_cast<int>(casr_result.recovery_ready);
+          << ',' << static_cast<int>(casr_result.recovery_ready)
+          << ',' << static_cast<int>(casr_result.scheduler_state)
+          << ',' << CasrSchedulerStateName(casr_result.scheduler_state)
+          << ',' << static_cast<int>(casr_result.scheduler_eligible)
+          << ',' << static_cast<int>(casr_result.scheduler_active)
+          << ',' << casr_result.scheduler_environment_confidence
+          << ',' << casr_result.scheduler_support_confidence
+          << ',' << casr_result.scheduler_cause_confidence
+          << ',' << casr_result.scheduler_temporal_confidence
+          << ',' << casr_result.scheduler_persistence_confidence
+          << ',' << casr_result.scheduler_principal_confidence
+          << ',' << casr_result.scheduler_raw_confidence
+          << ',' << casr_result.scheduler_target_strength
+          << ',' << casr_result.scheduler_activation_strength
+          << ',' << casr_result.scheduler_dt_s;
     };
 
     write_block(true, original_result, real_result);
@@ -1636,7 +1718,12 @@ namespace cocolic
                 << " | casr_ready="
                 << static_cast<int>(last_casr_result_.recovery_ready)
                 << " | casr_temporal_similarity="
-                << last_casr_result_.temporal_projector_similarity;
+                << last_casr_result_.temporal_projector_similarity
+                << " | casr_scheduler="
+                << CasrSchedulerStateName(
+                       last_casr_result_.scheduler_state)
+                << " | casr_activation="
+                << last_casr_result_.scheduler_activation_strength;
       if (support_injection_enabled_)
       {
         std::cout << " | injected_casr_route="
@@ -1656,7 +1743,13 @@ namespace cocolic
                          last_injected_casr_result_.recovery_ready)
                   << " | injected_casr_temporal_similarity="
                   << last_injected_casr_result_
-                         .temporal_projector_similarity;
+                         .temporal_projector_similarity
+                  << " | injected_casr_scheduler="
+                  << CasrSchedulerStateName(
+                         last_injected_casr_result_.scheduler_state)
+                  << " | injected_casr_activation="
+                  << last_injected_casr_result_
+                         .scheduler_activation_strength;
       }
     }
     std::cout << std::endl;

@@ -18,7 +18,23 @@ namespace cocolic
 {
 
   inline constexpr char kCasrShadowMethodVersion[] =
-      "knot_space_v2_overlap_debiased";
+      "knot_space_v2_overlap_debiased_scheduler_v1";
+
+  enum class CasrSchedulerState : int
+  {
+    Disabled = 0,
+    InvalidInput = 1,
+    UnsafeRoute = 2,
+    RouteMismatch = 3,
+    NoRecoveryBasis = 4,
+    NotReady = 5,
+    BelowEnterConfidence = 6,
+    BelowExitConfidence = 7,
+    Ramping = 8,
+    Active = 9
+  };
+
+  const char *CasrSchedulerStateName(CasrSchedulerState state);
 
   using CasrVector6 = Eigen::Matrix<double, 6, 1>;
   using CasrMatrix6 = Eigen::Matrix<double, 6, 6>;
@@ -33,6 +49,23 @@ namespace cocolic
     int route_consecutive_scans = 3;
     int projector_consecutive_scans = 3;
     double projector_similarity_threshold = 8e-1;
+
+    // Stage-4 intervention scheduler remains shadow-only. It converts a
+    // binary recovery_ready decision into an auditable, cause-aware,
+    // time-continuous candidate strength, but never writes estimator state.
+    bool scheduler_enabled = false;
+    double scheduler_environment_full_confidence_threshold = 3e-3;
+    double scheduler_environment_zero_confidence_threshold = 6e-3;
+    double scheduler_support_full_confidence_threshold = 2e-2;
+    double scheduler_support_zero_confidence_threshold = 5e-2;
+    double scheduler_projector_full_confidence = 9.5e-1;
+    double scheduler_principal_full_confidence = 9e-1;
+    int scheduler_persistence_full_scans = 5;
+    double scheduler_enter_confidence = 2.5e-1;
+    double scheduler_exit_confidence = 1e-1;
+    double scheduler_rise_time_s = 5e-1;
+    double scheduler_fall_time_s = 2e-1;
+    double scheduler_max_dt_s = 5e-1;
   };
 
   struct CasrShadowInput
@@ -41,6 +74,8 @@ namespace cocolic
     bool support_valid = false;
     bool environment_state = false;
     bool support_state = false;
+    double scan_timestamp_s = 0.0;
+    double support_quality_min = 0.0;
     CasrVector6 environment_relative_eigenvalues = CasrVector6::Zero();
     CasrMatrix6 environment_eigenvectors = CasrMatrix6::Identity();
 
@@ -91,6 +126,22 @@ namespace cocolic
     int projector_consistency_count = 0;
     bool recovery_ready = false;
 
+    // Shadow scheduler audit. activation_strength is a future intervention
+    // recommendation only and is never consumed by Ceres in this stage.
+    CasrSchedulerState scheduler_state = CasrSchedulerState::Disabled;
+    bool scheduler_eligible = false;
+    bool scheduler_active = false;
+    double scheduler_environment_confidence = 0.0;
+    double scheduler_support_confidence = 0.0;
+    double scheduler_cause_confidence = 0.0;
+    double scheduler_temporal_confidence = 0.0;
+    double scheduler_persistence_confidence = 0.0;
+    double scheduler_principal_confidence = 0.0;
+    double scheduler_raw_confidence = 0.0;
+    double scheduler_target_strength = 0.0;
+    double scheduler_activation_strength = 0.0;
+    double scheduler_dt_s = 0.0;
+
     // The six-dimensional matrices are representative-time summaries for CSV
     // inspection only. Routing and recovery_rank are computed exclusively in
     // the 6K knot space.
@@ -115,6 +166,11 @@ namespace cocolic
     int projector_consistency_count = 0;
     int previous_control_point_start_index = -1;
     Eigen::MatrixXd previous_recovery_basis;
+
+    bool scheduler_initialized = false;
+    bool scheduler_active = false;
+    double scheduler_strength = 0.0;
+    double scheduler_last_timestamp_s = 0.0;
   };
 
   class CasrShadowEvaluator

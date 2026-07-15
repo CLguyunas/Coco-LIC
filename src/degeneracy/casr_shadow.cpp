@@ -12,6 +12,35 @@
 
 namespace cocolic
 {
+  const char *CasrSchedulerStateName(CasrSchedulerState state)
+  {
+    switch (state)
+    {
+    case CasrSchedulerState::Disabled:
+      return "disabled";
+    case CasrSchedulerState::InvalidInput:
+      return "invalid_input";
+    case CasrSchedulerState::UnsafeRoute:
+      return "unsafe_route";
+    case CasrSchedulerState::RouteMismatch:
+      return "route_mismatch";
+    case CasrSchedulerState::NoRecoveryBasis:
+      return "no_recovery_basis";
+    case CasrSchedulerState::NotReady:
+      return "not_ready";
+    case CasrSchedulerState::BelowEnterConfidence:
+      return "below_enter_confidence";
+    case CasrSchedulerState::BelowExitConfidence:
+      return "below_exit_confidence";
+    case CasrSchedulerState::Ramping:
+      return "ramping";
+    case CasrSchedulerState::Active:
+      return "active";
+    default:
+      return "unknown";
+    }
+  }
+
   namespace
   {
     using DynamicBasis = Eigen::MatrixXd;
@@ -354,6 +383,292 @@ namespace cocolic
       return comparison;
     }
 
+    double ClampUnit(double value)
+    {
+      return std::max(0.0, std::min(1.0, value));
+    }
+
+    double DescendingConfidence(double value, double full_threshold,
+                                double zero_threshold)
+    {
+      if (!std::isfinite(value))
+      {
+        return 0.0;
+      }
+      if (zero_threshold <= full_threshold)
+      {
+        return value <= full_threshold ? 1.0 : 0.0;
+      }
+      if (value <= full_threshold)
+      {
+        return 1.0;
+      }
+      if (value >= zero_threshold)
+      {
+        return 0.0;
+      }
+      return ClampUnit((zero_threshold - value) /
+                       (zero_threshold - full_threshold));
+    }
+
+    double AscendingConfidence(double value, double zero_threshold,
+                               double full_threshold)
+    {
+      if (!std::isfinite(value))
+      {
+        return 0.0;
+      }
+      if (full_threshold <= zero_threshold)
+      {
+        return value >= full_threshold ? 1.0 : 0.0;
+      }
+      if (value <= zero_threshold)
+      {
+        return 0.0;
+      }
+      if (value >= full_threshold)
+      {
+        return 1.0;
+      }
+      return ClampUnit((value - zero_threshold) /
+                       (full_threshold - zero_threshold));
+    }
+
+    double PersistenceConfidence(const CasrShadowConfig &config,
+                                 int consistency_count)
+    {
+      if (consistency_count < config.projector_consecutive_scans)
+      {
+        return 0.0;
+      }
+      const int span = config.scheduler_persistence_full_scans -
+                       config.projector_consecutive_scans + 1;
+      return ClampUnit(static_cast<double>(
+                           consistency_count -
+                           config.projector_consecutive_scans + 1) /
+                       static_cast<double>(span));
+    }
+
+    bool IsSchedulableRoute(CasrRoute route)
+    {
+      return route == CasrRoute::EnvironmentCandidate ||
+             route == CasrRoute::SupportCandidate ||
+             route == CasrRoute::CoupledCommonCandidate;
+    }
+
+    void ResetSchedulerState(CasrTemporalState *state,
+                             double scan_timestamp_s)
+    {
+      if (!state)
+      {
+        return;
+      }
+      state->scheduler_initialized = std::isfinite(scan_timestamp_s);
+      state->scheduler_active = false;
+      state->scheduler_strength = 0.0;
+      state->scheduler_last_timestamp_s =
+          std::isfinite(scan_timestamp_s) ? scan_timestamp_s : 0.0;
+    }
+
+    void BlockScheduler(CasrSchedulerState scheduler_state,
+                        const CasrShadowInput &input,
+                        CasrTemporalState *state,
+                        CasrShadowResult &result)
+    {
+      ResetSchedulerState(state, input.scan_timestamp_s);
+      result.scheduler_state = scheduler_state;
+      result.scheduler_eligible = false;
+      result.scheduler_active = false;
+      result.scheduler_target_strength = 0.0;
+      result.scheduler_activation_strength = 0.0;
+      result.scheduler_dt_s = 0.0;
+    }
+
+    void UpdateShadowScheduler(const CasrShadowConfig &config,
+                               const CasrShadowInput &input,
+                               CasrTemporalState *state,
+                               CasrShadowResult &result)
+    {
+      if (!config.scheduler_enabled)
+      {
+        BlockScheduler(CasrSchedulerState::Disabled, input, state, result);
+        return;
+      }
+
+      const double environment_lambda =
+          input.environment_relative_eigenvalues[0];
+      result.scheduler_environment_confidence =
+          input.environment_state
+              ? DescendingConfidence(
+                    environment_lambda,
+                    config.scheduler_environment_full_confidence_threshold,
+                    config.scheduler_environment_zero_confidence_threshold)
+              : 0.0;
+      result.scheduler_support_confidence =
+          input.support_state
+              ? DescendingConfidence(
+                    input.support_quality_min,
+                    config.scheduler_support_full_confidence_threshold,
+                    config.scheduler_support_zero_confidence_threshold)
+              : 0.0;
+      result.scheduler_temporal_confidence = AscendingConfidence(
+          result.temporal_projector_similarity,
+          config.projector_similarity_threshold,
+          config.scheduler_projector_full_confidence);
+      result.scheduler_persistence_confidence = PersistenceConfidence(
+          config, result.projector_consistency_count);
+      result.scheduler_principal_confidence =
+          result.route == CasrRoute::CoupledCommonCandidate
+              ? AscendingConfidence(
+                    result.principal_cosine_max,
+                    config.principal_cosine_threshold,
+                    config.scheduler_principal_full_confidence)
+              : (IsSchedulableRoute(result.route) ? 1.0 : 0.0);
+
+      switch (result.route)
+      {
+      case CasrRoute::EnvironmentCandidate:
+        result.scheduler_cause_confidence =
+            result.scheduler_environment_confidence;
+        break;
+      case CasrRoute::SupportCandidate:
+        result.scheduler_cause_confidence =
+            result.scheduler_support_confidence;
+        break;
+      case CasrRoute::CoupledCommonCandidate:
+        result.scheduler_cause_confidence = std::min(
+            result.scheduler_principal_confidence,
+            std::min(result.scheduler_environment_confidence,
+                     result.scheduler_support_confidence));
+        break;
+      default:
+        result.scheduler_cause_confidence = 0.0;
+        break;
+      }
+
+      result.scheduler_raw_confidence = std::min(
+          result.scheduler_cause_confidence,
+          std::min(result.scheduler_temporal_confidence,
+                   result.scheduler_persistence_confidence));
+
+      if (!result.valid)
+      {
+        BlockScheduler(CasrSchedulerState::InvalidInput, input, state,
+                       result);
+        return;
+      }
+      if (!IsSchedulableRoute(result.route))
+      {
+        BlockScheduler(CasrSchedulerState::UnsafeRoute, input, state,
+                       result);
+        return;
+      }
+      if (result.route != result.stable_route)
+      {
+        BlockScheduler(CasrSchedulerState::RouteMismatch, input, state,
+                       result);
+        return;
+      }
+      if (result.recovery_knot_basis.cols() == 0)
+      {
+        BlockScheduler(CasrSchedulerState::NoRecoveryBasis, input, state,
+                       result);
+        return;
+      }
+      if (!result.recovery_ready)
+      {
+        BlockScheduler(CasrSchedulerState::NotReady, input, state, result);
+        return;
+      }
+
+      result.scheduler_eligible = true;
+      if (!state)
+      {
+        result.scheduler_active =
+            result.scheduler_raw_confidence >=
+            config.scheduler_enter_confidence;
+        result.scheduler_state = result.scheduler_active
+                                     ? CasrSchedulerState::Active
+                                     : CasrSchedulerState::BelowEnterConfidence;
+        result.scheduler_target_strength =
+            result.scheduler_active ? result.scheduler_raw_confidence : 0.0;
+        result.scheduler_activation_strength =
+            result.scheduler_target_strength;
+        return;
+      }
+
+      double dt_s = 0.0;
+      if (state->scheduler_initialized &&
+          std::isfinite(input.scan_timestamp_s) &&
+          input.scan_timestamp_s > state->scheduler_last_timestamp_s)
+      {
+        dt_s = std::min(config.scheduler_max_dt_s,
+                        input.scan_timestamp_s -
+                            state->scheduler_last_timestamp_s);
+      }
+      state->scheduler_initialized = std::isfinite(input.scan_timestamp_s);
+      if (state->scheduler_initialized)
+      {
+        state->scheduler_last_timestamp_s = input.scan_timestamp_s;
+      }
+      result.scheduler_dt_s = dt_s;
+
+      bool exited = false;
+      if (!state->scheduler_active)
+      {
+        if (result.scheduler_raw_confidence >=
+            config.scheduler_enter_confidence)
+        {
+          state->scheduler_active = true;
+        }
+      }
+      else if (result.scheduler_raw_confidence <=
+               config.scheduler_exit_confidence)
+      {
+        state->scheduler_active = false;
+        exited = true;
+      }
+
+      result.scheduler_target_strength =
+          state->scheduler_active ? result.scheduler_raw_confidence : 0.0;
+      if (result.scheduler_target_strength > state->scheduler_strength)
+      {
+        const double step = dt_s / config.scheduler_rise_time_s;
+        state->scheduler_strength = std::min(
+            result.scheduler_target_strength,
+            state->scheduler_strength + step);
+      }
+      else if (result.scheduler_target_strength < state->scheduler_strength)
+      {
+        const double step = dt_s / config.scheduler_fall_time_s;
+        state->scheduler_strength = std::max(
+            result.scheduler_target_strength,
+            state->scheduler_strength - step);
+      }
+      state->scheduler_strength = ClampUnit(state->scheduler_strength);
+      result.scheduler_activation_strength = state->scheduler_strength;
+      result.scheduler_active = state->scheduler_strength > 1e-12;
+
+      if (exited)
+      {
+        result.scheduler_state = CasrSchedulerState::BelowExitConfidence;
+      }
+      else if (!state->scheduler_active)
+      {
+        result.scheduler_state =
+            CasrSchedulerState::BelowEnterConfidence;
+      }
+      else if (std::abs(result.scheduler_activation_strength -
+                        result.scheduler_target_strength) > 1e-12)
+      {
+        result.scheduler_state = CasrSchedulerState::Ramping;
+      }
+      else
+      {
+        result.scheduler_state = CasrSchedulerState::Active;
+      }
+    }
+
     void UpdateTemporalGate(const CasrShadowConfig &config,
                             CasrTemporalState *state,
                             CasrShadowResult &result)
@@ -497,6 +812,54 @@ namespace cocolic
     {
       config_.projector_similarity_threshold = 8e-1;
     }
+    if (!std::isfinite(
+            config_.scheduler_environment_full_confidence_threshold))
+    {
+      config_.scheduler_environment_full_confidence_threshold = 3e-3;
+    }
+    if (!std::isfinite(
+            config_.scheduler_environment_zero_confidence_threshold))
+    {
+      config_.scheduler_environment_zero_confidence_threshold = 6e-3;
+    }
+    if (!std::isfinite(
+            config_.scheduler_support_full_confidence_threshold))
+    {
+      config_.scheduler_support_full_confidence_threshold = 2e-2;
+    }
+    if (!std::isfinite(
+            config_.scheduler_support_zero_confidence_threshold))
+    {
+      config_.scheduler_support_zero_confidence_threshold = 5e-2;
+    }
+    if (!std::isfinite(config_.scheduler_projector_full_confidence))
+    {
+      config_.scheduler_projector_full_confidence = 9.5e-1;
+    }
+    if (!std::isfinite(config_.scheduler_principal_full_confidence))
+    {
+      config_.scheduler_principal_full_confidence = 9e-1;
+    }
+    if (!std::isfinite(config_.scheduler_enter_confidence))
+    {
+      config_.scheduler_enter_confidence = 2.5e-1;
+    }
+    if (!std::isfinite(config_.scheduler_exit_confidence))
+    {
+      config_.scheduler_exit_confidence = 1e-1;
+    }
+    if (!std::isfinite(config_.scheduler_rise_time_s))
+    {
+      config_.scheduler_rise_time_s = 5e-1;
+    }
+    if (!std::isfinite(config_.scheduler_fall_time_s))
+    {
+      config_.scheduler_fall_time_s = 2e-1;
+    }
+    if (!std::isfinite(config_.scheduler_max_dt_s))
+    {
+      config_.scheduler_max_dt_s = 5e-1;
+    }
 
     config_.environment_relative_threshold =
         std::max(1e-12, config_.environment_relative_threshold);
@@ -516,6 +879,38 @@ namespace cocolic
     config_.projector_similarity_threshold =
         std::max(0.0,
                  std::min(1.0, config_.projector_similarity_threshold));
+    config_.scheduler_environment_full_confidence_threshold =
+        std::max(0.0,
+                 config_.scheduler_environment_full_confidence_threshold);
+    config_.scheduler_environment_zero_confidence_threshold = std::max(
+        config_.scheduler_environment_full_confidence_threshold + 1e-12,
+        config_.scheduler_environment_zero_confidence_threshold);
+    config_.scheduler_support_full_confidence_threshold =
+        std::max(0.0,
+                 config_.scheduler_support_full_confidence_threshold);
+    config_.scheduler_support_zero_confidence_threshold = std::max(
+        config_.scheduler_support_full_confidence_threshold + 1e-12,
+        config_.scheduler_support_zero_confidence_threshold);
+    config_.scheduler_projector_full_confidence = std::max(
+        config_.projector_similarity_threshold + 1e-12,
+        std::min(1.0, config_.scheduler_projector_full_confidence));
+    config_.scheduler_principal_full_confidence = std::max(
+        config_.principal_cosine_threshold + 1e-12,
+        std::min(1.0, config_.scheduler_principal_full_confidence));
+    config_.scheduler_persistence_full_scans = std::max(
+        config_.projector_consecutive_scans,
+        config_.scheduler_persistence_full_scans);
+    config_.scheduler_enter_confidence =
+        ClampUnit(config_.scheduler_enter_confidence);
+    config_.scheduler_exit_confidence = std::min(
+        config_.scheduler_enter_confidence,
+        ClampUnit(config_.scheduler_exit_confidence));
+    config_.scheduler_rise_time_s =
+        std::max(1e-6, config_.scheduler_rise_time_s);
+    config_.scheduler_fall_time_s =
+        std::max(1e-6, config_.scheduler_fall_time_s);
+    config_.scheduler_max_dt_s =
+        std::max(1e-6, config_.scheduler_max_dt_s);
   }
 
   CasrShadowResult CasrShadowEvaluator::Evaluate(
@@ -523,12 +918,23 @@ namespace cocolic
       CasrTemporalState *temporal_state) const
   {
     CasrShadowResult result;
+    const auto invalid_result = [&]()
+    {
+      if (temporal_state)
+      {
+        temporal_state->projector_consistency_count = 0;
+        temporal_state->previous_control_point_start_index = -1;
+        temporal_state->previous_recovery_basis.resize(0, 0);
+      }
+      UpdateShadowScheduler(config_, input, temporal_state, result);
+      return result;
+    };
     if (!config_.enabled || !input.environment_valid ||
         !input.support_valid ||
         !input.environment_relative_eigenvalues.allFinite() ||
         !input.environment_eigenvectors.allFinite())
     {
-      return result;
+      return invalid_result();
     }
 
     if (!input.support_knot_weak_basis ||
@@ -536,7 +942,7 @@ namespace cocolic
         !input.reference_pose_cross ||
         !input.representative_pose_mapping)
     {
-      return result;
+      return invalid_result();
     }
     const Eigen::MatrixXd &support_knot_weak_basis =
         *input.support_knot_weak_basis;
@@ -560,7 +966,7 @@ namespace cocolic
         !reference_pose_cross.allFinite() ||
         !representative_pose_mapping.allFinite())
     {
-      return result;
+      return invalid_result();
     }
 
     result.cause = (input.environment_state ? 1 : 0) +
@@ -576,7 +982,7 @@ namespace cocolic
                               result.environment_lift_residual) ||
         !BuildSupportBasis(input, config_, result.support_knot_basis))
     {
-      return result;
+      return invalid_result();
     }
 
     result.environment_rank =
@@ -600,7 +1006,7 @@ namespace cocolic
       const Eigen::VectorXd singular_values = svd.singularValues();
       if (!singular_values.allFinite() || singular_values.size() == 0)
       {
-        return CasrShadowResult();
+        return invalid_result();
       }
 
       const double overlap_energy = singular_values.squaredNorm();
@@ -667,7 +1073,7 @@ namespace cocolic
       break;
     case CasrRoute::Invalid:
     default:
-      return result;
+      return invalid_result();
     }
 
     result.recovery_rank =
@@ -679,6 +1085,7 @@ namespace cocolic
         &result.representative_pose_rank);
     result.valid = true;
     UpdateTemporalGate(config_, temporal_state, result);
+    UpdateShadowScheduler(config_, input, temporal_state, result);
     return result;
   }
 

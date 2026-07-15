@@ -337,13 +337,54 @@ max-rank denominator still penalizes a genuine rank change.
 `temporal_projector_affinity` make the decision independently reproducible.
 The overlap size is zero for the first candidate after a route change because
 no previous basis exists. CSV `method_version` is
-`knot_space_v2_overlap_debiased` for this definition.
+`knot_space_v2_overlap_debiased_scheduler_v1` after the Stage-4 scheduler is
+enabled; the overlap definition itself is unchanged.
 
 `recovery_ready` becomes true only after the stable route matches the raw route
 and the similarity remains above `projector_similarity_threshold` for
 `projector_consecutive_scans`. Raw routes remain logged, so the filter cannot
 hide a flickering detector. The real and injected-copy paths keep separate
 temporal states.
+
+### Cause-aware pre-intervention scheduler
+
+The Stage-4 scheduler remains inside the shadow evaluator. It does not add a
+factor, alter a residual, or expose a write path to the estimator. Its purpose
+is to turn a binary `recovery_ready` event into an auditable continuous
+candidate strength before estimator intervention is attempted.
+
+Four confidence terms are computed in `[0, 1]`:
+
+1. environment confidence decreases linearly from one at the detector enter
+   threshold to zero at the exit threshold;
+2. support confidence uses the same descending interpolation between the
+   support enter and exit quality thresholds;
+3. temporal confidence increases from zero at
+   `projector_similarity_threshold` to one at
+   `projector_full_confidence`;
+4. persistence confidence increases from the first `recovery_ready` scan to
+   one at `persistence_full_scans`.
+
+For `environment_candidate` and `support_candidate`, cause confidence is the
+matching detector confidence. A `coupled_common_candidate` additionally uses
+the minimum environment/support confidence and a principal-angle confidence
+that rises from `principal_cosine_threshold` to
+`principal_full_confidence`. The raw scheduler confidence is conservative:
+
+```text
+raw_confidence = min(cause_confidence,
+                     temporal_confidence,
+                     persistence_confidence).
+```
+
+An enter/exit confidence pair provides a second hysteresis layer. While the
+candidate remains valid, target strength follows the raw confidence and the
+reported activation strength approaches it with time-based rise/fall slew
+limits. Using elapsed seconds rather than scans makes the slew independent of
+LiDAR frequency. Invalid input, `inactive`, `coupled_conflict`, route mismatch,
+missing recovery basis, or `recovery_ready == false` immediately blocks and
+resets the scheduler. Real and injected-copy schedulers reuse their already
+independent temporal states.
 
 When enabled, CASR writes:
 
@@ -357,8 +398,10 @@ representative 6DoF matrix, the v2 block records `method_version`, active knot
 start/dimension, lift residual, basis orthogonality error, stable route,
 pending-route count, temporal similarity, temporal overlap size, restricted
 ranks, forced-overlap rank, raw projector affinity, consistency count, and
-`recovery_ready`. The original 81-column observability CSV and 45-column
-injection CSV remain unchanged.
+`recovery_ready`. The scheduler extension then records its state code/name,
+eligibility and active flags, all confidence components, raw confidence,
+target strength, slewed activation strength, and elapsed time. The original
+81-column observability CSV and 45-column injection CSV remain unchanged.
 
 `CASR-Shadow` still does not modify Ceres, the spline, measurements, the map,
 or the marginalization prior. A configuration with `shadow_only: false` is
@@ -425,6 +468,13 @@ asserted during an unstable transition. For every compared pair verify
 and recompute the logged similarity from the raw affinity. In particular, two
 rank-12 subspaces in an 18-dimensional three-knot overlap have a forced rank
 of six; those six directions alone must yield similarity zero, not 0.5.
+For scheduler validation, verify that every unsafe/conflict/not-ready row has
+zero activation, confidence values remain in `[0, 1]`, the real and injected
+paths evolve independently, rise/fall changes respect their elapsed-time slew
+limits, and a threshold-edge ready event produces either
+`below_enter_confidence` or only negligible target strength. Stable,
+high-confidence environment segments should ramp smoothly instead of jumping
+from zero to full strength.
 Use at least five repeated detector-OFF and shadow-ON runs to report ATE/RPE
 mean and standard deviation; two extrema alone are not a non-interference
 test. This still does not validate recovery accuracy. Estimator intervention

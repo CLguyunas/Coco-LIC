@@ -113,6 +113,33 @@ dso_detect_only:
         route_consecutive_scans: 3
         projector_consecutive_scans: 3
         projector_similarity_threshold: 8.0e-1
+        # Stage 4: cause-aware pre-intervention scheduler. It converts a
+        # recovery_ready candidate into a continuous shadow strength only;
+        # the value is logged and is not consumed by Ceres.
+        activation_scheduler:
+            enabled: true
+            # Full/zero confidence anchors reuse the detector hysteresis
+            # bands instead of introducing unrelated physical thresholds.
+            environment_full_confidence_threshold: 3.0e-3
+            environment_zero_confidence_threshold: 6.0e-3
+            support_full_confidence_threshold: 2.0e-2
+            support_zero_confidence_threshold: 5.0e-2
+            # Similarity/cosine values at or above these anchors receive full
+            # confidence. Values at the CASR decision thresholds receive zero.
+            projector_full_confidence: 9.5e-1
+            principal_full_confidence: 9.0e-1
+            # A ready candidate reaches full persistence confidence only after
+            # five consistent scans, although binary recovery_ready starts at
+            # the existing three-scan gate.
+            persistence_full_scans: 5
+            # Confidence hysteresis prevents an activation latch from
+            # chattering near one threshold.
+            enter_confidence: 2.5e-1
+            exit_confidence: 1.0e-1
+            # Time-based slew limits are independent of scan frequency.
+            rise_time_s: 5.0e-1
+            fall_time_s: 2.0e-1
+            max_dt_s: 5.0e-1
 
 
 ### EvalutaionParams ###
