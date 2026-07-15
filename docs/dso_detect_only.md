@@ -317,15 +317,27 @@ dropping one boundary knot:
 ```text
 U_previous_overlap = orth(restrict(U_previous, common_knots))
 U_current_overlap  = orth(restrict(U_current, common_knots))
-similarity = ||U_previous_overlap^T U_current_overlap||_F^2 /
-             max(rank_previous_overlap, rank_current_overlap).
+affinity = ||U_previous_overlap^T U_current_overlap||_F^2
+forced_overlap = max(0, rank_previous_overlap + rank_current_overlap
+                        - overlap_ambient_dimension)
+similarity = (affinity - forced_overlap) /
+             (max(rank_previous_overlap, rank_current_overlap)
+                - forced_overlap).
 ```
 
-The max-rank denominator still penalizes a genuine rank change in the overlap.
-`temporal_overlap_control_point_num` logs the size of the comparison window;
-it is zero for the first candidate after a route change because no previous
-basis exists. CSV `method_version` is `knot_space_v2_overlap` for this corrected
-temporal definition.
+The result is clamped to `[0, 1]`. Here the overlap ambient dimension is six
+times the number of common control points. Two high-rank subspaces in this
+ambient space must share at least `forced_overlap` dimensions even when their
+remaining directions are unrelated. Subtracting this unavoidable Grassmann
+intersection prevents rank alone from satisfying the temporal gate, while the
+max-rank denominator still penalizes a genuine rank change.
+
+`temporal_overlap_control_point_num`, both restricted ranks,
+`temporal_forced_overlap_rank`, and the unnormalized
+`temporal_projector_affinity` make the decision independently reproducible.
+The overlap size is zero for the first candidate after a route change because
+no previous basis exists. CSV `method_version` is
+`knot_space_v2_overlap_debiased` for this definition.
 
 `recovery_ready` becomes true only after the stable route matches the raw route
 and the similarity remains above `projector_similarity_threshold` for
@@ -343,9 +355,10 @@ Each row contains real and optional injected-copy blocks. In addition to the
 raw cause/route, ranks, principal cosines, overlap, exclusive ratios and the
 representative 6DoF matrix, the v2 block records `method_version`, active knot
 start/dimension, lift residual, basis orthogonality error, stable route,
-pending-route count, temporal similarity, temporal overlap size, consistency
-count, and `recovery_ready`. The original 81-column observability CSV and
-45-column injection CSV remain unchanged.
+pending-route count, temporal similarity, temporal overlap size, restricted
+ranks, forced-overlap rank, raw projector affinity, consistency count, and
+`recovery_ready`. The original 81-column observability CSV and 45-column
+injection CSV remain unchanged.
 
 `CASR-Shadow` still does not modify Ceres, the spline, measurements, the map,
 or the marginalization prior. A configuration with `shadow_only: false` is
@@ -407,7 +420,11 @@ knot basis is orthonormal within numerical tolerance, environment-lift
 residuals remain finite, the stable route suppresses isolated raw-route
 flips, consecutive candidates report a nonzero temporal overlap, stable
 environment segments can reach `recovery_ready`, and `recovery_ready` is never
-asserted during an unstable transition.
+asserted during an unstable transition. For every compared pair verify
+`forced_overlap == max(0, previous_rank + current_rank - 6 * overlap_knots)`
+and recompute the logged similarity from the raw affinity. In particular, two
+rank-12 subspaces in an 18-dimensional three-knot overlap have a forced rank
+of six; those six directions alone must yield similarity zero, not 0.5.
 Use at least five repeated detector-OFF and shadow-ON runs to report ATE/RPE
 mean and standard deviation; two extrema alone are not a non-interference
 test. This still does not validate recovery accuracy. Estimator intervention

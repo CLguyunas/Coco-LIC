@@ -1475,6 +1475,10 @@ namespace cocolic
           << ',' << prefix << "route_candidate_count"
           << ',' << prefix << "temporal_projector_similarity"
           << ',' << prefix << "temporal_overlap_control_point_num"
+          << ',' << prefix << "temporal_previous_overlap_rank"
+          << ',' << prefix << "temporal_current_overlap_rank"
+          << ',' << prefix << "temporal_forced_overlap_rank"
+          << ',' << prefix << "temporal_projector_affinity"
           << ',' << prefix << "projector_consistency_count"
           << ',' << prefix << "recovery_ready";
     };
@@ -1554,6 +1558,10 @@ namespace cocolic
           << ',' << casr_result.route_candidate_count
           << ',' << casr_result.temporal_projector_similarity
           << ',' << casr_result.temporal_overlap_control_point_num
+          << ',' << casr_result.temporal_previous_overlap_rank
+          << ',' << casr_result.temporal_current_overlap_rank
+          << ',' << casr_result.temporal_forced_overlap_rank
+          << ',' << casr_result.temporal_projector_affinity
           << ',' << casr_result.projector_consistency_count
           << ',' << static_cast<int>(casr_result.recovery_ready);
     };

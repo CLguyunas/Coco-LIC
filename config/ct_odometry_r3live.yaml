@@ -107,8 +107,9 @@ dso_detect_only:
         # cos(theta)>=0.7 defines a reliable 6K common principal direction.
         principal_cosine_threshold: 7.0e-1
         # Shadow-only temporal gate. Raw routes remain logged; stable routes
-        # and recovery_ready require route continuity plus overlap-normalized
-        # projector continuity on common global control points.
+        # and recovery_ready require route continuity plus dimension-debiased
+        # projector continuity on common global control points. The debiasing
+        # removes overlap that high-rank subspaces must share geometrically.
         route_consecutive_scans: 3
         projector_consecutive_scans: 3
         projector_similarity_threshold: 8.0e-1

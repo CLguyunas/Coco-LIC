@@ -257,21 +257,26 @@ namespace cocolic
       return error.cwiseAbs().maxCoeff();
     }
 
-    double KnotSubspaceSimilarity(const DynamicBasis &first,
-                                  int first_start_index,
-                                  const DynamicBasis &second,
-                                  int second_start_index,
-                                  int *overlap_control_point_num)
+    struct KnotSubspaceComparison
     {
-      if (overlap_control_point_num)
-      {
-        *overlap_control_point_num = 0;
-      }
+      double similarity = 0.0;
+      double projector_affinity = 0.0;
+      int overlap_control_point_num = 0;
+      int previous_overlap_rank = 0;
+      int current_overlap_rank = 0;
+      int forced_overlap_rank = 0;
+    };
+
+    KnotSubspaceComparison CompareKnotSubspaces(
+        const DynamicBasis &first, int first_start_index,
+        const DynamicBasis &second, int second_start_index)
+    {
+      KnotSubspaceComparison comparison;
       if (first.rows() % 6 != 0 || second.rows() % 6 != 0 ||
           first.cols() == 0 || second.cols() == 0 ||
           first_start_index < 0 || second_start_index < 0)
       {
-        return 0.0;
+        return comparison;
       }
 
       const int first_control_points = static_cast<int>(first.rows()) / 6;
@@ -283,14 +288,11 @@ namespace cocolic
           second_start_index + second_control_points);
       if (overlap_start >= overlap_end)
       {
-        return 0.0;
+        return comparison;
       }
 
       const int overlap_control_points = overlap_end - overlap_start;
-      if (overlap_control_point_num)
-      {
-        *overlap_control_point_num = overlap_control_points;
-      }
+      comparison.overlap_control_point_num = overlap_control_points;
       DynamicBasis first_overlap(6 * overlap_control_points, first.cols());
       DynamicBasis second_overlap(6 * overlap_control_points,
                                   second.cols());
@@ -309,8 +311,8 @@ namespace cocolic
       // The active spline window normally advances by one control point per
       // scan. Re-orthonormalize both restrictions before comparing them so
       // that energy carried by non-overlapping boundary knots does not create
-      // an artificial similarity loss. The max-rank denominator still
-      // penalizes a genuine rank change inside the common global-knot window.
+      // an artificial similarity loss. The comparison below also removes the
+      // intersection forced solely by both subspaces having high rank.
       const DynamicBasis first_local_basis =
           OrthonormalBasis(first_overlap, 1e-8);
       const DynamicBasis second_local_basis =
@@ -318,15 +320,38 @@ namespace cocolic
       if (first_local_basis.cols() == 0 ||
           second_local_basis.cols() == 0)
       {
-        return 0.0;
+        return comparison;
       }
 
+      comparison.previous_overlap_rank = first_local_basis.cols();
+      comparison.current_overlap_rank = second_local_basis.cols();
+      const int ambient_dimension = 6 * overlap_control_points;
+      comparison.forced_overlap_rank = std::max(
+          0, comparison.previous_overlap_rank +
+                 comparison.current_overlap_rank - ambient_dimension);
       const Eigen::MatrixXd cross =
           first_local_basis.transpose() * second_local_basis;
+      comparison.projector_affinity = cross.squaredNorm();
+      const int maximum_rank = std::max(comparison.previous_overlap_rank,
+                                        comparison.current_overlap_rank);
       const double normalizer = static_cast<double>(
-          std::max(first_local_basis.cols(), second_local_basis.cols()));
-      return std::max(0.0, std::min(1.0,
-                                   cross.squaredNorm() / normalizer));
+          maximum_rank - comparison.forced_overlap_rank);
+
+      // Two subspaces of ranks r1 and r2 in an n-dimensional ambient space
+      // must intersect in at least max(0, r1 + r2 - n) dimensions. Remove
+      // that unavoidable Grassmann intersection before normalizing so that a
+      // high rank alone cannot satisfy the temporal consistency gate.
+      if (normalizer <= 0.0)
+      {
+        comparison.similarity = 1.0;
+        return comparison;
+      }
+      const double debiased_affinity =
+          comparison.projector_affinity -
+          static_cast<double>(comparison.forced_overlap_rank);
+      comparison.similarity = std::max(
+          0.0, std::min(1.0, debiased_affinity / normalizer));
+      return comparison;
     }
 
     void UpdateTemporalGate(const CasrShadowConfig &config,
@@ -398,12 +423,22 @@ namespace cocolic
         }
         else
         {
-          result.temporal_projector_similarity = KnotSubspaceSimilarity(
+          const KnotSubspaceComparison comparison = CompareKnotSubspaces(
               state->previous_recovery_basis,
               state->previous_control_point_start_index,
               result.recovery_knot_basis,
-              result.support_control_point_start_index,
-              &result.temporal_overlap_control_point_num);
+              result.support_control_point_start_index);
+          result.temporal_projector_similarity = comparison.similarity;
+          result.temporal_overlap_control_point_num =
+              comparison.overlap_control_point_num;
+          result.temporal_previous_overlap_rank =
+              comparison.previous_overlap_rank;
+          result.temporal_current_overlap_rank =
+              comparison.current_overlap_rank;
+          result.temporal_forced_overlap_rank =
+              comparison.forced_overlap_rank;
+          result.temporal_projector_affinity =
+              comparison.projector_affinity;
           if (result.temporal_projector_similarity >=
               config.projector_similarity_threshold)
           {
