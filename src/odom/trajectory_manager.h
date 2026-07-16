@@ -253,12 +253,19 @@ namespace cocolic
         Eigen::aligned_vector<SO3d> &reference_rotations,
         Eigen::aligned_vector<Eigen::Vector3d> &reference_positions) const;
 
+    enum class CasrMeasurementStage
+    {
+      PreSolve,
+      Counterfactual,
+      PostSolve
+    };
+
     void MeasureCasrIncrement(
         const CasrInterventionPlan &plan,
         const Eigen::MatrixXd &recovery_basis,
         const Eigen::aligned_vector<SO3d> &reference_rotations,
         const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
-        bool post_solve,
+        CasrMeasurementStage stage,
         CasrInterventionReport &report) const;
 
     void TranfromTraj4DoF(double t_min, double t_max, const Eigen::Matrix3d &R0,

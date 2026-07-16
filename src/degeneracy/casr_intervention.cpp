@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace cocolic
 {
@@ -30,6 +31,23 @@ namespace cocolic
       return route == CasrRoute::EnvironmentCandidate ||
              route == CasrRoute::SupportCandidate ||
              route == CasrRoute::CoupledCommonCandidate;
+    }
+
+    double Median(const Eigen::VectorXd &values)
+    {
+      if (values.size() <= 0)
+      {
+        return 0.0;
+      }
+      std::vector<double> ordered(values.data(),
+                                  values.data() + values.size());
+      std::sort(ordered.begin(), ordered.end());
+      const size_t middle = ordered.size() / 2;
+      if (ordered.size() % 2 == 1)
+      {
+        return ordered[middle];
+      }
+      return 0.5 * (ordered[middle - 1] + ordered[middle]);
     }
   } // namespace
 
@@ -67,6 +85,10 @@ namespace cocolic
       return "diagnostics_copy_blocked";
     case CasrInterventionState::SolverFailureRecovered:
       return "solver_failure_recovered";
+    case CasrInterventionState::CurvatureInvalid:
+      return "curvature_invalid";
+    case CasrInterventionState::CurvatureSufficient:
+      return "curvature_sufficient";
     default:
       return "unknown";
     }
@@ -85,6 +107,24 @@ namespace cocolic
     config.max_effective_information_weight = std::max(
         0.0, ReadFiniteDouble(
                  node, "max_effective_information_weight", 100.0));
+    config.curvature_matching_enabled =
+        ReadValue<bool>(node, "curvature_matching_enabled", true);
+    config.curvature_target_relative_to_max = std::max(
+        0.0, ReadFiniteDouble(
+                 node, "curvature_target_relative_to_max", 6e-3));
+    config.curvature_max_added_relative_to_max = std::max(
+        0.0, ReadFiniteDouble(
+                 node, "curvature_max_added_relative_to_max", 2e-2));
+    config.curvature_gain = std::max(
+        0.0, ReadFiniteDouble(node, "curvature_gain", 1.0));
+    config.curvature_min_reference = std::max(
+        0.0, ReadFiniteDouble(
+                 node, "curvature_min_reference", 1e-9));
+    config.counterfactual_validation =
+        ReadValue<bool>(node, "counterfactual_validation", true);
+    config.counterfactual_ratio_denominator_floor = std::max(
+        1e-12, ReadFiniteDouble(
+                   node, "counterfactual_ratio_denominator_floor", 1e-6));
     config.min_activation_strength = std::clamp(
         ReadFiniteDouble(node, "min_activation_strength", 5e-2),
         0.0, 1.0);
@@ -197,16 +237,26 @@ namespace cocolic
     plan.used_activation_strength = std::min(
         config.max_activation_strength,
         casr_result.scheduler_activation_strength);
-    plan.effective_information_weight = std::min(
-        config.max_effective_information_weight,
-        config.base_information_weight * plan.used_activation_strength);
-    plan.sqrt_information_weight =
-        std::sqrt(std::max(0.0, plan.effective_information_weight));
-    if (!std::isfinite(plan.sqrt_information_weight) ||
-        plan.sqrt_information_weight <= 0.0)
+    plan.curvature_matching_enabled = config.curvature_matching_enabled;
+    plan.recovery_basis_rotation = Eigen::MatrixXd::Identity(
+        plan.recovery_rank, plan.recovery_rank);
+    if (!config.curvature_matching_enabled)
     {
-      plan.state = CasrInterventionState::InvalidInput;
-      return plan;
+      plan.effective_information_weight = std::min(
+          config.max_effective_information_weight,
+          config.base_information_weight * plan.used_activation_strength);
+      plan.sqrt_information_weight =
+          std::sqrt(std::max(0.0, plan.effective_information_weight));
+      if (!std::isfinite(plan.sqrt_information_weight) ||
+          plan.sqrt_information_weight <= 0.0)
+      {
+        plan.state = CasrInterventionState::InvalidInput;
+        return plan;
+      }
+      plan.effective_information_weights = Eigen::VectorXd::Constant(
+          plan.recovery_rank, plan.effective_information_weight);
+      plan.sqrt_information_weights = Eigen::VectorXd::Constant(
+          plan.recovery_rank, plan.sqrt_information_weight);
     }
 
     plan.eligible = true;
@@ -214,6 +264,87 @@ namespace cocolic
                      ? CasrInterventionState::Applied
                      : CasrInterventionState::DryRun;
     return plan;
+  }
+
+  bool FinalizeCasrInterventionPlanWithCurvature(
+      const CasrInterventionConfig &config,
+      const CasrCurvatureEstimate &estimate,
+      CasrInterventionPlan &plan)
+  {
+    if (!plan.eligible || !config.curvature_matching_enabled)
+    {
+      return plan.eligible;
+    }
+
+    plan.curvature_valid = estimate.valid;
+    plan.curvature_tangent_dimension = estimate.tangent_dimension;
+    plan.reference_curvature_max = estimate.reference_curvature_max;
+    if (!estimate.valid || plan.recovery_rank <= 0 ||
+        estimate.recovery_curvatures.size() != plan.recovery_rank ||
+        estimate.recovery_eigenvectors.rows() != plan.recovery_rank ||
+        estimate.recovery_eigenvectors.cols() != plan.recovery_rank ||
+        !estimate.recovery_curvatures.allFinite() ||
+        !estimate.recovery_eigenvectors.allFinite() ||
+        !std::isfinite(estimate.reference_curvature_max) ||
+        estimate.reference_curvature_max < config.curvature_min_reference)
+    {
+      plan.eligible = false;
+      plan.state = CasrInterventionState::CurvatureInvalid;
+      return false;
+    }
+
+    plan.recovery_basis_rotation = estimate.recovery_eigenvectors;
+    plan.recovery_curvature_min = estimate.recovery_curvatures.minCoeff();
+    plan.recovery_curvature_median = Median(estimate.recovery_curvatures);
+    plan.recovery_curvature_max = estimate.recovery_curvatures.maxCoeff();
+    plan.target_curvature =
+        config.curvature_target_relative_to_max *
+        estimate.reference_curvature_max;
+    const double maximum_added_information =
+        config.curvature_max_added_relative_to_max *
+        estimate.reference_curvature_max;
+
+    plan.effective_information_weights = Eigen::VectorXd::Zero(
+        plan.recovery_rank);
+    for (int i = 0; i < plan.recovery_rank; ++i)
+    {
+      const double missing_curvature = std::max(
+          0.0, plan.target_curvature - estimate.recovery_curvatures[i]);
+      plan.effective_information_weights[i] =
+          std::min(maximum_added_information,
+                   plan.used_activation_strength * config.curvature_gain *
+                       missing_curvature);
+    }
+    if (!plan.effective_information_weights.allFinite())
+    {
+      plan.eligible = false;
+      plan.state = CasrInterventionState::CurvatureInvalid;
+      return false;
+    }
+
+    plan.added_information_min =
+        plan.effective_information_weights.minCoeff();
+    plan.added_information_median =
+        Median(plan.effective_information_weights);
+    plan.added_information_max =
+        plan.effective_information_weights.maxCoeff();
+    plan.effective_information_weight = plan.added_information_max;
+    plan.sqrt_information_weights =
+        plan.effective_information_weights.array().max(0.0).sqrt().matrix();
+    plan.sqrt_information_weight =
+        plan.sqrt_information_weights.maxCoeff();
+    if (!std::isfinite(plan.sqrt_information_weight) ||
+        plan.sqrt_information_weight <= 0.0)
+    {
+      plan.eligible = false;
+      plan.state = CasrInterventionState::CurvatureSufficient;
+      return false;
+    }
+
+    plan.state = config.apply_to_estimator
+                     ? CasrInterventionState::Applied
+                     : CasrInterventionState::DryRun;
+    return true;
   }
 
 } // namespace cocolic

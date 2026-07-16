@@ -19,7 +19,7 @@ namespace cocolic
 {
 
   inline constexpr char kCasrInterventionMethodVersion[] =
-      "knot_space_increment_anchor_v1";
+      "knot_space_curvature_matched_counterfactual_v2";
 
   enum class CasrInterventionState : int
   {
@@ -37,7 +37,9 @@ namespace cocolic
     Applied = 11,
     SolverFailure = 12,
     DiagnosticsCopyBlocked = 13,
-    SolverFailureRecovered = 14
+    SolverFailureRecovered = 14,
+    CurvatureInvalid = 15,
+    CurvatureSufficient = 16
   };
 
   const char *CasrInterventionStateName(CasrInterventionState state);
@@ -50,16 +52,41 @@ namespace cocolic
     bool apply_to_estimator = false;
     bool output_csv = true;
 
-    // The factor cost is
-    //   0.5 * base_information_weight * activation * ||B^T D delta||^2,
-    // where D delta stacks [r*dtheta, dp] for every active control point.
+    // Legacy fixed-weight mode. It is used only when curvature matching is
+    // explicitly disabled.
     double base_information_weight = 1.0;
     double max_effective_information_weight = 100.0;
+
+    // Match every recovery direction to the curvature of the actual final
+    // LIC problem before the intervention factor is added.  Curvatures are
+    // expressed in the same metric [r*dtheta, dp] used by the CASR basis.
+    bool curvature_matching_enabled = true;
+    double curvature_target_relative_to_max = 6e-3;
+    double curvature_max_added_relative_to_max = 2e-2;
+    double curvature_gain = 1.0;
+    double curvature_min_reference = 1e-9;
+
+    // When armed, solve the unmodified and CASR problems from the exact same
+    // parameter snapshot. The baseline solution is retained as a safe
+    // fallback if the CASR solve is unusable.
+    bool counterfactual_validation = true;
+    double counterfactual_ratio_denominator_floor = 1e-6;
     double min_activation_strength = 5e-2;
     double max_activation_strength = 1.0;
     int max_control_points = 32;
     int max_recovery_rank = 32;
     double max_basis_orthogonality_error = 1e-6;
+  };
+
+  struct CasrCurvatureEstimate
+  {
+    bool valid = false;
+    int tangent_dimension = 0;
+    double reference_curvature_max = 0.0;
+    Eigen::VectorXd recovery_curvatures;
+    // Columns rotate the original orthonormal recovery basis into the
+    // eigen-directions of its projected LIC curvature.
+    Eigen::MatrixXd recovery_eigenvectors;
   };
 
   CasrInterventionConfig ReadCasrInterventionConfig(
@@ -77,6 +104,21 @@ namespace cocolic
     double characteristic_range = 1.0;
     double effective_information_weight = 0.0;
     double sqrt_information_weight = 0.0;
+    Eigen::VectorXd effective_information_weights;
+    Eigen::VectorXd sqrt_information_weights;
+    Eigen::MatrixXd recovery_basis_rotation;
+
+    bool curvature_matching_enabled = false;
+    bool curvature_valid = false;
+    int curvature_tangent_dimension = 0;
+    double reference_curvature_max = 0.0;
+    double target_curvature = 0.0;
+    double recovery_curvature_min = 0.0;
+    double recovery_curvature_median = 0.0;
+    double recovery_curvature_max = 0.0;
+    double added_information_min = 0.0;
+    double added_information_median = 0.0;
+    double added_information_max = 0.0;
   };
 
   CasrInterventionPlan BuildCasrInterventionPlan(
@@ -84,6 +126,14 @@ namespace cocolic
       const CasrShadowResult &casr_result,
       double characteristic_range,
       int trajectory_control_point_num);
+
+  // Converts an already safety-gated plan into independently weighted
+  // recovery eigen-directions. Returns false and fails closed when the
+  // estimator curvature cannot be trusted.
+  bool FinalizeCasrInterventionPlanWithCurvature(
+      const CasrInterventionConfig &config,
+      const CasrCurvatureEstimate &estimate,
+      CasrInterventionPlan &plan);
 
   struct CasrInterventionReport
   {
@@ -107,6 +157,18 @@ namespace cocolic
     double effective_information_weight = 0.0;
     double sqrt_information_weight = 0.0;
 
+    bool curvature_matching_enabled = false;
+    bool curvature_valid = false;
+    int curvature_tangent_dimension = 0;
+    double reference_curvature_max = 0.0;
+    double target_curvature = 0.0;
+    double recovery_curvature_min = 0.0;
+    double recovery_curvature_median = 0.0;
+    double recovery_curvature_max = 0.0;
+    double added_information_min = 0.0;
+    double added_information_median = 0.0;
+    double added_information_max = 0.0;
+
     double pre_total_increment_norm = 0.0;
     double pre_projected_increment_norm = 0.0;
     double pre_orthogonal_increment_norm = 0.0;
@@ -117,6 +179,17 @@ namespace cocolic
     double post_factor_residual_norm = 0.0;
     double max_rotation_increment_rad = 0.0;
     double max_translation_increment_m = 0.0;
+
+    bool counterfactual_enabled = false;
+    bool counterfactual_solver_usable = false;
+    int counterfactual_solver_successful_steps = 0;
+    int counterfactual_solver_unsuccessful_steps = 0;
+    double counterfactual_total_increment_norm = 0.0;
+    double counterfactual_projected_increment_norm = 0.0;
+    double counterfactual_orthogonal_increment_norm = 0.0;
+    double counterfactual_factor_residual_norm = 0.0;
+    double projected_casr_over_counterfactual = 0.0;
+    double orthogonal_casr_over_counterfactual = 0.0;
 
     bool solver_usable = false;
     int solver_successful_steps = 0;

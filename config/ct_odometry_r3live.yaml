@@ -151,12 +151,22 @@ dso_detect_only:
         enabled: true
         apply_to_estimator: false
         output_csv: true
-        # Cost = 0.5 * base_information_weight * scheduler_activation
-        #        * ||B_recovery^T [r*dtheta, dp]||^2.
-        # Keep 1.0 for the first armed A/B run, then sweep only after the
-        # dry-run CSV confirms valid ranges and bounded increments.
+        # Default v2 mode evaluates the real final-LIC Jacobian before adding
+        # CASR. Each recovery eigen-direction receives only the information
+        # missing from target_relative * lambda_max(H_LIC), scaled by the
+        # scheduler activation. This avoids dataset-specific manual weights.
+        curvature_matching_enabled: true
+        curvature_target_relative_to_max: 6.0e-3
+        curvature_max_added_relative_to_max: 2.0e-2
+        curvature_gain: 1.0
+        curvature_min_reference: 1.0e-9
+        # Armed frames solve baseline and CASR from the exact same parameter
+        # snapshot. The baseline solution is also the CASR-failure fallback.
+        counterfactual_validation: true
+        counterfactual_ratio_denominator_floor: 1.0e-6
+        # Legacy fixed-weight fallback, used only when
+        # curvature_matching_enabled is false.
         base_information_weight: 1.0
-        # Independent hard ceiling after scheduler scaling.
         max_effective_information_weight: 1.0e+2
         min_activation_strength: 5.0e-2
         max_activation_strength: 1.0

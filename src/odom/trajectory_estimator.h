@@ -20,6 +20,7 @@
 
 #include <ceres/ceres.h>
 #include <ceres/covariance.h>
+#include <degeneracy/casr_intervention.h>
 #include <odom/factor/ceres_local_param.h>
 #include <imu/imu_state_estimator.h>
 #include <lidar/lidar_feature.h>
@@ -276,7 +277,13 @@ namespace cocolic
         const Eigen::aligned_vector<SO3d> &reference_rotations,
         const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
         double characteristic_range,
-        double sqrt_information_weight);
+        const Eigen::VectorXd &sqrt_information_weights);
+
+    bool EvaluateCasrProjectedCurvature(
+        int control_point_start_index,
+        double characteristic_range,
+        const Eigen::MatrixXd &recovery_basis,
+        CasrCurvatureEstimate &estimate) const;
 
     struct ParameterBlockSnapshot
     {

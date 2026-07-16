@@ -391,11 +391,13 @@ namespace cocolic
       std::cout << "(" << kCasrInterventionMethodVersion
                 << ",apply="
                 << casr_intervention_config_.apply_to_estimator
-                << ",base_information="
-                << casr_intervention_config_.base_information_weight
-                << ",max_effective_information="
+                << ",curvature_matching="
+                << casr_intervention_config_.curvature_matching_enabled
+                << ",curvature_target/max="
                 << casr_intervention_config_
-                       .max_effective_information_weight
+                       .curvature_target_relative_to_max
+                << ",counterfactual="
+                << casr_intervention_config_.counterfactual_validation
                 << ",activation="
                 << casr_intervention_config_.min_activation_strength
                 << "-"
@@ -1644,7 +1646,21 @@ namespace cocolic
            "solver_unsuccessful_steps,primary_solver_usable,"
            "primary_solver_successful_steps,"
            "primary_solver_unsuccessful_steps,fallback_attempted,"
-           "fallback_solver_usable\n";
+           "fallback_solver_usable,curvature_matching_enabled,"
+           "curvature_valid,curvature_tangent_dimension,"
+           "reference_curvature_max,target_curvature,"
+           "recovery_curvature_min,recovery_curvature_median,"
+           "recovery_curvature_max,added_information_min,"
+           "added_information_median,added_information_max,"
+           "counterfactual_enabled,counterfactual_solver_usable,"
+           "counterfactual_solver_successful_steps,"
+           "counterfactual_solver_unsuccessful_steps,"
+           "counterfactual_total_increment_norm,"
+           "counterfactual_projected_increment_norm,"
+           "counterfactual_orthogonal_increment_norm,"
+           "counterfactual_factor_residual_norm,"
+           "projected_casr_over_counterfactual,"
+           "orthogonal_casr_over_counterfactual\n";
     intervention_csv_stream_.flush();
   }
 
@@ -1696,7 +1712,28 @@ namespace cocolic
         << report.primary_solver_successful_steps << ','
         << report.primary_solver_unsuccessful_steps << ','
         << static_cast<int>(report.fallback_attempted) << ','
-        << static_cast<int>(report.fallback_solver_usable) << '\n';
+        << static_cast<int>(report.fallback_solver_usable) << ','
+        << static_cast<int>(report.curvature_matching_enabled) << ','
+        << static_cast<int>(report.curvature_valid) << ','
+        << report.curvature_tangent_dimension << ','
+        << report.reference_curvature_max << ','
+        << report.target_curvature << ','
+        << report.recovery_curvature_min << ','
+        << report.recovery_curvature_median << ','
+        << report.recovery_curvature_max << ','
+        << report.added_information_min << ','
+        << report.added_information_median << ','
+        << report.added_information_max << ','
+        << static_cast<int>(report.counterfactual_enabled) << ','
+        << static_cast<int>(report.counterfactual_solver_usable) << ','
+        << report.counterfactual_solver_successful_steps << ','
+        << report.counterfactual_solver_unsuccessful_steps << ','
+        << report.counterfactual_total_increment_norm << ','
+        << report.counterfactual_projected_increment_norm << ','
+        << report.counterfactual_orthogonal_increment_norm << ','
+        << report.counterfactual_factor_residual_norm << ','
+        << report.projected_casr_over_counterfactual << ','
+        << report.orthogonal_casr_over_counterfactual << '\n';
     intervention_csv_stream_.flush();
   }
 

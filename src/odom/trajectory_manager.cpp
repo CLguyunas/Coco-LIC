@@ -405,7 +405,7 @@ namespace cocolic
       const Eigen::MatrixXd &recovery_basis,
       const Eigen::aligned_vector<SO3d> &reference_rotations,
       const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
-      bool post_solve,
+      CasrMeasurementStage stage,
       CasrInterventionReport &report) const
   {
     if (plan.control_point_num <= 0 || plan.recovery_rank <= 0 ||
@@ -450,9 +450,19 @@ namespace cocolic
     const double total_norm = scaled_increment.norm();
     const double projected_norm = projected_coordinates.norm();
     const double orthogonal_norm = orthogonal_increment.norm();
-    const double factor_residual_norm =
-        plan.sqrt_information_weight * projected_norm;
-    if (post_solve)
+    double factor_residual_norm = 0.0;
+    if (plan.sqrt_information_weights.size() == projected_coordinates.size())
+    {
+      factor_residual_norm =
+          (plan.sqrt_information_weights.array() *
+           projected_coordinates.array()).matrix().norm();
+    }
+    else
+    {
+      factor_residual_norm =
+          plan.sqrt_information_weight * projected_norm;
+    }
+    if (stage == CasrMeasurementStage::PostSolve)
     {
       report.post_total_increment_norm = total_norm;
       report.post_projected_increment_norm = projected_norm;
@@ -460,6 +470,13 @@ namespace cocolic
       report.post_factor_residual_norm = factor_residual_norm;
       report.max_rotation_increment_rad = max_rotation_increment_rad;
       report.max_translation_increment_m = max_translation_increment_m;
+    }
+    else if (stage == CasrMeasurementStage::Counterfactual)
+    {
+      report.counterfactual_total_increment_norm = total_norm;
+      report.counterfactual_projected_increment_norm = projected_norm;
+      report.counterfactual_orthogonal_increment_norm = orthogonal_norm;
+      report.counterfactual_factor_residual_norm = factor_residual_norm;
     }
     else
     {
@@ -491,6 +508,10 @@ namespace cocolic
         casr_intervention_config_.base_information_weight;
     last_casr_intervention_report_.max_effective_information_weight =
         casr_intervention_config_.max_effective_information_weight;
+    last_casr_intervention_report_.curvature_matching_enabled =
+        casr_intervention_config_.curvature_matching_enabled;
+    last_casr_intervention_report_.counterfactual_enabled =
+        casr_intervention_config_.counterfactual_validation;
     if (point_corrs.empty() || imu_data_.empty() || imu_data_.size() == 1)
     {
       if (casr_result)
@@ -632,20 +653,13 @@ namespace cocolic
     }
 
     CasrInterventionPlan casr_plan;
-    ceres::ResidualBlockId casr_residual_block_id = nullptr;
-    TrajectoryEstimator::ParameterSnapshot casr_rollback_snapshot;
+    Eigen::MatrixXd casr_recovery_basis;
     Eigen::aligned_vector<SO3d> casr_reference_rotations;
     Eigen::aligned_vector<Eigen::Vector3d> casr_reference_positions;
-    if (casr_result)
-    {
-      casr_plan = BuildCasrInterventionPlan(
-          casr_intervention_config_, *casr_result,
-          casr_characteristic_range,
-          static_cast<int>(trajectory_->numKnots()));
+    bool casr_measurement_ready = false;
+    const auto sync_casr_plan_to_report = [&]() {
       last_casr_intervention_report_.state = casr_plan.state;
       last_casr_intervention_report_.eligible = casr_plan.eligible;
-      last_casr_intervention_report_.route = casr_result->route;
-      last_casr_intervention_report_.data_source = casr_result->data_source;
       last_casr_intervention_report_.control_point_start_index =
           casr_plan.control_point_start_index;
       last_casr_intervention_report_.control_point_num =
@@ -662,6 +676,36 @@ namespace cocolic
           casr_plan.effective_information_weight;
       last_casr_intervention_report_.sqrt_information_weight =
           casr_plan.sqrt_information_weight;
+      last_casr_intervention_report_.curvature_valid =
+          casr_plan.curvature_valid;
+      last_casr_intervention_report_.curvature_tangent_dimension =
+          casr_plan.curvature_tangent_dimension;
+      last_casr_intervention_report_.reference_curvature_max =
+          casr_plan.reference_curvature_max;
+      last_casr_intervention_report_.target_curvature =
+          casr_plan.target_curvature;
+      last_casr_intervention_report_.recovery_curvature_min =
+          casr_plan.recovery_curvature_min;
+      last_casr_intervention_report_.recovery_curvature_median =
+          casr_plan.recovery_curvature_median;
+      last_casr_intervention_report_.recovery_curvature_max =
+          casr_plan.recovery_curvature_max;
+      last_casr_intervention_report_.added_information_min =
+          casr_plan.added_information_min;
+      last_casr_intervention_report_.added_information_median =
+          casr_plan.added_information_median;
+      last_casr_intervention_report_.added_information_max =
+          casr_plan.added_information_max;
+    };
+    if (casr_result)
+    {
+      casr_plan = BuildCasrInterventionPlan(
+          casr_intervention_config_, *casr_result,
+          casr_characteristic_range,
+          static_cast<int>(trajectory_->numKnots()));
+      last_casr_intervention_report_.route = casr_result->route;
+      last_casr_intervention_report_.data_source = casr_result->data_source;
+      sync_casr_plan_to_report();
 
       if (casr_plan.eligible)
       {
@@ -670,109 +714,248 @@ namespace cocolic
                 casr_reference_rotations, casr_reference_positions))
         {
           casr_plan.eligible = false;
-          last_casr_intervention_report_.eligible = false;
-          last_casr_intervention_report_.state =
-              CasrInterventionState::MissingReference;
+          casr_plan.state = CasrInterventionState::MissingReference;
+          sync_casr_plan_to_report();
         }
         else
         {
-          MeasureCasrIncrement(
-              casr_plan, casr_result->recovery_knot_basis,
-              casr_reference_rotations, casr_reference_positions, false,
-              last_casr_intervention_report_);
-          if (casr_intervention_config_.apply_to_estimator)
+          if (casr_intervention_config_.curvature_matching_enabled)
           {
-            casr_residual_block_id =
-                estimator->AddCasrSubspaceIntervention(
-                    casr_plan.control_point_start_index,
-                    casr_result->recovery_knot_basis,
-                    casr_reference_rotations, casr_reference_positions,
-                    casr_plan.characteristic_range,
-                    casr_plan.sqrt_information_weight);
-            last_casr_intervention_report_.factor_added =
-                casr_residual_block_id != nullptr;
-            last_casr_intervention_report_.applied =
-                last_casr_intervention_report_.factor_added;
-            if (!last_casr_intervention_report_.factor_added)
-            {
-              casr_plan.eligible = false;
-              last_casr_intervention_report_.eligible = false;
-              last_casr_intervention_report_.state =
-                  CasrInterventionState::InvalidBasis;
-            }
+            CasrCurvatureEstimate curvature_estimate;
+            estimator->EvaluateCasrProjectedCurvature(
+                casr_plan.control_point_start_index,
+                casr_plan.characteristic_range,
+                casr_result->recovery_knot_basis,
+                curvature_estimate);
+            FinalizeCasrInterventionPlanWithCurvature(
+                casr_intervention_config_, curvature_estimate, casr_plan);
+          }
+          casr_recovery_basis =
+              casr_result->recovery_knot_basis *
+              casr_plan.recovery_basis_rotation;
+          casr_measurement_ready =
+              casr_recovery_basis.rows() ==
+                  casr_result->recovery_knot_basis.rows() &&
+              casr_recovery_basis.cols() == casr_plan.recovery_rank &&
+              casr_recovery_basis.allFinite();
+          if (!casr_measurement_ready && casr_plan.eligible)
+          {
+            casr_plan.eligible = false;
+            casr_plan.state = CasrInterventionState::InvalidBasis;
+          }
+          sync_casr_plan_to_report();
+          if (casr_measurement_ready)
+          {
+            MeasureCasrIncrement(
+                casr_plan, casr_recovery_basis,
+                casr_reference_rotations, casr_reference_positions,
+                CasrMeasurementStage::PreSolve,
+                last_casr_intervention_report_);
           }
         }
       }
     }
 
-    if (last_casr_intervention_report_.factor_added)
-    {
-      // Snapshot every Ceres parameter block, not only the CASR knots. If the
-      // armed solve is unusable, biases and all other jointly optimized state
-      // must be restored before retrying the same final LIC solve without the
-      // intervention factor.
-      casr_rollback_snapshot = estimator->CaptureParameterSnapshot();
-    }
-
     TicToc t_opt;
     static int loam_cnt = 0;
-    ceres::Solver::Summary summary = estimator->Solve(iteration, false);
-    last_casr_intervention_report_.primary_solver_usable =
-        summary.IsSolutionUsable();
-    last_casr_intervention_report_.primary_solver_successful_steps =
-        summary.num_successful_steps;
-    last_casr_intervention_report_.primary_solver_unsuccessful_steps =
-        summary.num_unsuccessful_steps;
+    ceres::Solver::Summary summary;
+    ceres::Solver::Summary counterfactual_summary;
+    TrajectoryEstimator::ParameterSnapshot initial_snapshot;
+    TrajectoryEstimator::ParameterSnapshot counterfactual_solution;
+    ceres::ResidualBlockId casr_residual_block_id = nullptr;
+    bool counterfactual_attempted = false;
+    bool initial_state_available = false;
+    bool skip_casr_solve = false;
+    bool committed_state_valid = true;
+    const bool factor_requested =
+        casr_plan.eligible && casr_intervention_config_.apply_to_estimator &&
+        casr_measurement_ready;
 
-    if (last_casr_intervention_report_.factor_added &&
-        !last_casr_intervention_report_.primary_solver_usable)
+    if (factor_requested)
     {
-      const bool restored =
-          estimator->RestoreParameterSnapshot(casr_rollback_snapshot);
-      const bool removed =
-          estimator->RemoveResidualBlock(casr_residual_block_id);
-      last_casr_intervention_report_.applied = false;
-      if (restored && removed)
+      // Snapshot every parameter block before either branch. Both solves must
+      // start from this exact state, including biases and visual variables.
+      initial_snapshot = estimator->CaptureParameterSnapshot();
+      initial_state_available = !initial_snapshot.empty();
+      if (!initial_state_available)
       {
-        last_casr_intervention_report_.fallback_attempted = true;
-        summary = estimator->Solve(iteration, false);
-        last_casr_intervention_report_.fallback_solver_usable =
-            summary.IsSolutionUsable();
-        if (!last_casr_intervention_report_.fallback_solver_usable)
+        casr_plan.eligible = false;
+        casr_plan.state = CasrInterventionState::InvalidInput;
+        sync_casr_plan_to_report();
+      }
+    }
+
+    if (factor_requested && initial_state_available &&
+        casr_intervention_config_.counterfactual_validation)
+    {
+      counterfactual_attempted = true;
+      counterfactual_summary = estimator->Solve(iteration, false);
+      last_casr_intervention_report_.counterfactual_solver_usable =
+          counterfactual_summary.IsSolutionUsable();
+      last_casr_intervention_report_.counterfactual_solver_successful_steps =
+          counterfactual_summary.num_successful_steps;
+      last_casr_intervention_report_.counterfactual_solver_unsuccessful_steps =
+          counterfactual_summary.num_unsuccessful_steps;
+      MeasureCasrIncrement(
+          casr_plan, casr_recovery_basis, casr_reference_rotations,
+          casr_reference_positions,
+          CasrMeasurementStage::Counterfactual,
+          last_casr_intervention_report_);
+      if (counterfactual_summary.IsSolutionUsable())
+      {
+        counterfactual_solution = estimator->CaptureParameterSnapshot();
+      }
+      if (!estimator->RestoreParameterSnapshot(initial_snapshot))
+      {
+        skip_casr_solve = true;
+        casr_plan.eligible = false;
+        casr_plan.state = CasrInterventionState::SolverFailure;
+        sync_casr_plan_to_report();
+        if (!counterfactual_solution.empty())
         {
-          // The fallback itself failed. Restore the pre-final-iteration state
-          // once more so neither failed solve is committed to the trajectory.
-          estimator->RestoreParameterSnapshot(casr_rollback_snapshot);
+          committed_state_valid =
+              estimator->RestoreParameterSnapshot(counterfactual_solution);
         }
-        last_casr_intervention_report_.state =
+        else
+        {
+          committed_state_valid = false;
+        }
+        summary = counterfactual_summary;
+      }
+    }
+
+    if (factor_requested && initial_state_available && !skip_casr_solve)
+    {
+      casr_residual_block_id = estimator->AddCasrSubspaceIntervention(
+          casr_plan.control_point_start_index, casr_recovery_basis,
+          casr_reference_rotations, casr_reference_positions,
+          casr_plan.characteristic_range,
+          casr_plan.sqrt_information_weights);
+      last_casr_intervention_report_.factor_added =
+          casr_residual_block_id != nullptr;
+      if (!last_casr_intervention_report_.factor_added)
+      {
+        casr_plan.eligible = false;
+        casr_plan.state = CasrInterventionState::InvalidBasis;
+        sync_casr_plan_to_report();
+        if (counterfactual_attempted)
+        {
+          if (!counterfactual_solution.empty())
+          {
+            committed_state_valid =
+                estimator->RestoreParameterSnapshot(counterfactual_solution);
+          }
+          else
+          {
+            committed_state_valid = false;
+          }
+          summary = counterfactual_summary;
+        }
+        else
+        {
+          summary = estimator->Solve(iteration, false);
+        }
+        skip_casr_solve = true;
+      }
+    }
+
+    if (last_casr_intervention_report_.factor_added && !skip_casr_solve)
+    {
+      summary = estimator->Solve(iteration, false);
+      last_casr_intervention_report_.primary_solver_usable =
+          summary.IsSolutionUsable();
+      last_casr_intervention_report_.primary_solver_successful_steps =
+          summary.num_successful_steps;
+      last_casr_intervention_report_.primary_solver_unsuccessful_steps =
+          summary.num_unsuccessful_steps;
+      last_casr_intervention_report_.applied = summary.IsSolutionUsable();
+
+      if (!summary.IsSolutionUsable())
+      {
+        const bool removed =
+            estimator->RemoveResidualBlock(casr_residual_block_id);
+        last_casr_intervention_report_.fallback_attempted = true;
+        if (removed && counterfactual_attempted &&
+            !counterfactual_solution.empty())
+        {
+          const bool baseline_restored =
+              estimator->RestoreParameterSnapshot(counterfactual_solution);
+          last_casr_intervention_report_.fallback_solver_usable =
+              baseline_restored && counterfactual_summary.IsSolutionUsable();
+          if (baseline_restored)
+          {
+            summary = counterfactual_summary;
+          }
+        }
+        else if (removed && initial_state_available &&
+                 estimator->RestoreParameterSnapshot(initial_snapshot))
+        {
+          summary = estimator->Solve(iteration, false);
+          last_casr_intervention_report_.fallback_solver_usable =
+              summary.IsSolutionUsable();
+          if (!summary.IsSolutionUsable())
+          {
+            estimator->RestoreParameterSnapshot(initial_snapshot);
+          }
+        }
+        casr_plan.state =
             last_casr_intervention_report_.fallback_solver_usable
                 ? CasrInterventionState::SolverFailureRecovered
                 : CasrInterventionState::SolverFailure;
+        last_casr_intervention_report_.state = casr_plan.state;
+        if (!last_casr_intervention_report_.fallback_solver_usable &&
+            initial_state_available)
+        {
+          committed_state_valid =
+              estimator->RestoreParameterSnapshot(initial_snapshot);
+        }
       }
       else
       {
         last_casr_intervention_report_.state =
-            CasrInterventionState::SolverFailure;
+            CasrInterventionState::Applied;
       }
     }
+    else if (!counterfactual_attempted && !skip_casr_solve)
+    {
+      summary = estimator->Solve(iteration, false);
+      last_casr_intervention_report_.primary_solver_usable =
+          summary.IsSolutionUsable();
+      last_casr_intervention_report_.primary_solver_successful_steps =
+          summary.num_successful_steps;
+      last_casr_intervention_report_.primary_solver_unsuccessful_steps =
+          summary.num_unsuccessful_steps;
+    }
+
     last_casr_intervention_report_.solver_usable =
-        summary.IsSolutionUsable();
+        committed_state_valid && summary.IsSolutionUsable();
     last_casr_intervention_report_.solver_successful_steps =
         summary.num_successful_steps;
     last_casr_intervention_report_.solver_unsuccessful_steps =
         summary.num_unsuccessful_steps;
-    if (casr_result && casr_plan.eligible &&
-        !casr_reference_rotations.empty())
+    if (casr_measurement_ready && !casr_reference_rotations.empty())
     {
       MeasureCasrIncrement(
-          casr_plan, casr_result->recovery_knot_basis,
-          casr_reference_rotations, casr_reference_positions, true,
+          casr_plan, casr_recovery_basis,
+          casr_reference_rotations, casr_reference_positions,
+          CasrMeasurementStage::PostSolve,
           last_casr_intervention_report_);
-      if (last_casr_intervention_report_.factor_added &&
-          !last_casr_intervention_report_.solver_usable)
+      if (counterfactual_attempted &&
+          last_casr_intervention_report_.counterfactual_solver_usable &&
+          last_casr_intervention_report_.applied)
       {
-        last_casr_intervention_report_.state =
-            CasrInterventionState::SolverFailure;
+        const double denominator_floor =
+            casr_intervention_config_.counterfactual_ratio_denominator_floor;
+        last_casr_intervention_report_.projected_casr_over_counterfactual =
+            last_casr_intervention_report_.post_projected_increment_norm /
+            std::max(denominator_floor,
+                     last_casr_intervention_report_
+                         .counterfactual_projected_increment_norm);
+        last_casr_intervention_report_.orthogonal_casr_over_counterfactual =
+            last_casr_intervention_report_.post_orthogonal_increment_norm /
+            std::max(denominator_floor,
+                     last_casr_intervention_report_
+                         .counterfactual_orthogonal_increment_norm);
       }
     }
     double opt_time = t_opt.toc();

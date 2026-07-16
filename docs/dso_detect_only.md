@@ -88,6 +88,14 @@ dso_detect_only:
         enabled: true
         apply_to_estimator: false
         output_csv: true
+        curvature_matching_enabled: true
+        curvature_target_relative_to_max: 6.0e-3
+        curvature_max_added_relative_to_max: 2.0e-2
+        curvature_gain: 1.0
+        curvature_min_reference: 1.0e-9
+        counterfactual_validation: true
+        counterfactual_ratio_denominator_floor: 1.0e-6
+        # Legacy fixed-weight mode only:
         base_information_weight: 1.0
         max_effective_information_weight: 1.0e+2
         min_activation_strength: 5.0e-2
@@ -454,21 +462,35 @@ delta = [r*Log(R_reference^-1 R_current),
          p_current - p_reference].
 ```
 
-For the orthonormal recovery basis `B_r`, the residual is
+Before adding a factor, v2 asks Ceres for the robustified Jacobian of the
+unmodified final-LIC problem with respect to the active CASR knots. Rotation
+columns are converted from radians to the same characteristic-range metric as
+`[r*dtheta, dp]`. Let `H_s` be this scaled conditional knot Hessian. The code
+diagonalizes the recovery-space curvature
 
 ```text
-effective_information = min(max_effective_information_weight,
-                            base_information_weight * activation_strength)
-residual = sqrt(effective_information)
-           * B_r^T delta.
+C_r = B_r^T H_s B_r = U diag(h_i) U^T
+B_w = B_r U
+target = curvature_target_relative_to_max * lambda_max(H_s)
+w_i = clamp(activation * curvature_gain * (target - h_i),
+            0,
+            curvature_max_added_relative_to_max * lambda_max(H_s))
+residual_i = sqrt(w_i) * B_w(:,i)^T delta.
 ```
 
-Therefore only the diagnosed recovery coordinates are damped. Updates in the
-orthogonal, observable complement remain unconstrained by this factor. The
-SO(3) Jacobian uses the exact right-Jacobian inverse corresponding to Coco-LIC's
-right perturbation. The factor is added only to the final LIC refinement and
-is never inserted into `UpdateLICPrior`; a transient diagnosis cannot pollute
-the long-lived marginalization prior.
+Thus every recovery direction receives only its measured curvature deficit;
+directions already above the target receive zero added information. If all
+directions are sufficient the frame is logged as `curvature_sufficient` and no
+factor is added. Invalid or near-zero reference curvature fails closed as
+`curvature_invalid`. The legacy scalar `base_information_weight` path remains
+available only when `curvature_matching_enabled: false`.
+
+Only diagnosed recovery coordinates are damped. Updates in the orthogonal,
+observable complement remain unconstrained by this factor. The SO(3) Jacobian
+uses the exact right-Jacobian inverse corresponding to Coco-LIC's right
+perturbation. The factor is added only to the final LIC refinement and is never
+inserted into `UpdateLICPrior`; a transient diagnosis cannot pollute the
+long-lived marginalization prior.
 
 The intervention repeats the following hard gates independently of the
 scheduler: valid CASR input, one of the three schedulable routes, raw/stable
@@ -480,51 +502,55 @@ routes, diagnostics-copy results, or missing references always produce zero
 estimator factors. The provenance check is repeated at the estimator boundary;
 it does not rely only on the caller selecting the real result.
 
-Before an armed solve, every parameter block registered in the final Ceres
-problem is snapshotted. If the CASR solve is unusable, the code restores all
-control points and jointly optimized states, removes the CASR residual, and
-retries the same final LIC solve without intervention. If that fallback also
-fails, the pre-final-iteration state is restored again. Thus a failed CASR
-attempt is never committed silently.
+With `counterfactual_validation: true`, every parameter block registered in
+the final Ceres problem is snapshotted. The unmodified baseline is solved and
+measured first; then the exact pre-solve snapshot is restored and the CASR
+problem is solved. This produces a same-frame, same-initial-state comparison.
+The baseline solution snapshot is also retained: if the CASR solve is unusable,
+the factor is removed and the already validated baseline solution is restored.
+If a baseline snapshot is unavailable, the previous remove-and-resolve fallback
+is used. Thus a failed CASR attempt is never committed silently.
 
 With `casr_intervention.enabled: true`, a fourth audit file is written:
 
 ```text
-config/data/degenerate_seq_02_casr_intervention.csv
+data/degenerate_seq_02_casr_intervention.csv
 ```
 
 Its `state` distinguishes safety blocks, `dry_run`, `applied`, recovered
 solver failure, and unrecovered solver failure. It records source provenance,
 requested/used activation, effective information, control-point range/rank,
-factor-added/committed flags, primary/fallback solver status, and the total,
-projected, and orthogonal scaled increments before and after the final solve.
-`pre/post_factor_residual_norm` allows direct A/B verification that the armed
-factor actually suppresses the selected component rather than merely changing
-the trajectory elsewhere.
+factor-added/committed flags, primary/fallback solver status, projected LIC
+curvatures, per-direction added-information summaries, and the total,
+projected, and orthogonal scaled increments. The decisive effectiveness fields
+are `projected_casr_over_counterfactual` and
+`orthogonal_casr_over_counterfactual`, which compare the CASR and unmodified
+solutions of the same frame from the same initial state.
 
 Use the two-switch sequence deliberately:
 
-1. `enabled: true`, `apply_to_estimator: false`: dry-run eligibility and
-   increment audit; the trajectory must remain within repeated shadow-only
-   variation;
-2. `enabled: true`, `apply_to_estimator: true`: armed run, initially with
-   `base_information_weight: 1.0`;
-3. compare OFF, dry-run, and armed repeats before sweeping the single
-   information weight. Never tune detector thresholds and intervention weight
-   simultaneously.
+1. `enabled: true`, `apply_to_estimator: false`: validate curvature extraction,
+   routing, and the automatically computed direction weights without changing
+   the estimator;
+2. `enabled: true`, `apply_to_estimator: true`: enable same-frame
+   counterfactual solving and the curvature-matched factor;
+3. use the logged same-frame ratio as the primary factor-effect test, then use
+   complete-trajectory ATE/RPE as the end-to-end accuracy test. Do not tune the
+   detector thresholds during this validation.
 
 Audit one run, or align a dry-run and armed run by scan timestamp, with:
 
 ```shell
 python3 tools/analyze_casr_intervention.py \
-  --run dry=config/data/sequence_dry_casr_intervention.csv \
-  --run armed=config/data/sequence_armed_casr_intervention.csv
+  --run dry=data/sequence_dry_casr_intervention.csv \
+  --run armed=data/sequence_armed_casr_intervention.csv
 ```
 
 The command exits nonzero for source leakage, inconsistent factor/commit
 flags, a factor added while `apply_to_estimator` is false, non-finite metrics,
-or invalid fallback-state combinations. It also reports median and p90
-post/pre ratios for the diagnosed projection and its orthogonal complement.
+or invalid fallback-state combinations. It reports dry-run post/pre metrics,
+curvature-matched added information, and median/p90 CASR-to-same-frame-baseline
+ratios for the diagnosed projection and its orthogonal complement.
 
 ## Baseline non-interference check
 

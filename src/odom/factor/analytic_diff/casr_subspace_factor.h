@@ -31,12 +31,12 @@ namespace cocolic
           const Eigen::aligned_vector<SO3d> &reference_rotations,
           const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
           double characteristic_range,
-          double sqrt_information_weight)
+          const Eigen::VectorXd &sqrt_information_weights)
           : recovery_basis_(recovery_basis),
             reference_rotations_(reference_rotations),
             reference_positions_(reference_positions),
             characteristic_range_(characteristic_range),
-            sqrt_information_weight_(sqrt_information_weight),
+            sqrt_information_weights_(sqrt_information_weights),
             control_point_num_(
                 static_cast<int>(reference_rotations.size()))
       {
@@ -51,6 +51,20 @@ namespace cocolic
         }
       }
 
+      CasrSubspaceFactor(
+          const Eigen::MatrixXd &recovery_basis,
+          const Eigen::aligned_vector<SO3d> &reference_rotations,
+          const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
+          double characteristic_range,
+          double sqrt_information_weight)
+          : CasrSubspaceFactor(
+                recovery_basis, reference_rotations, reference_positions,
+                characteristic_range,
+                Eigen::VectorXd::Constant(
+                    recovery_basis.cols(), sqrt_information_weight))
+      {
+      }
+
       bool IsValid() const
       {
         return control_point_num_ > 0 && num_residuals() > 0 &&
@@ -61,8 +75,10 @@ namespace cocolic
                recovery_basis_.allFinite() &&
                std::isfinite(characteristic_range_) &&
                characteristic_range_ > 0.0 &&
-               std::isfinite(sqrt_information_weight_) &&
-               sqrt_information_weight_ > 0.0;
+               sqrt_information_weights_.size() == num_residuals() &&
+               sqrt_information_weights_.allFinite() &&
+               (sqrt_information_weights_.array() >= 0.0).all() &&
+               sqrt_information_weights_.maxCoeff() > 0.0;
       }
 
       bool Evaluate(double const *const *parameters, double *residuals,
@@ -106,8 +122,10 @@ namespace cocolic
         }
 
         Eigen::Map<Eigen::VectorXd> residual(residuals, num_residuals());
-        residual = sqrt_information_weight_ *
-                   recovery_basis_.transpose() * scaled_increment;
+        residual =
+            (sqrt_information_weights_.array() *
+             (recovery_basis_.transpose() * scaled_increment).array())
+                .matrix();
 
         if (!jacobians)
         {
@@ -122,10 +140,13 @@ namespace cocolic
                 jacobian_rotation(jacobians[i], num_residuals(), 4);
             jacobian_rotation.setZero();
             jacobian_rotation.leftCols<3>() =
-                sqrt_information_weight_ * characteristic_range_ *
+                characteristic_range_ *
                 recovery_basis_.block(6 * i, 0, 3, num_residuals())
                     .transpose() *
                 rotation_log_jacobians[static_cast<size_t>(i)];
+            jacobian_rotation.leftCols<3>() =
+                sqrt_information_weights_.asDiagonal() *
+                jacobian_rotation.leftCols<3>().eval();
           }
           if (jacobians[control_point_num_ + i])
           {
@@ -135,7 +156,7 @@ namespace cocolic
                     jacobians[control_point_num_ + i],
                     num_residuals(), 3);
             jacobian_position =
-                sqrt_information_weight_ *
+                sqrt_information_weights_.asDiagonal() *
                 recovery_basis_.block(6 * i + 3, 0, 3,
                                       num_residuals())
                     .transpose();
@@ -149,7 +170,7 @@ namespace cocolic
       Eigen::aligned_vector<SO3d> reference_rotations_;
       Eigen::aligned_vector<Eigen::Vector3d> reference_positions_;
       double characteristic_range_ = 1.0;
-      double sqrt_information_weight_ = 0.0;
+      Eigen::VectorXd sqrt_information_weights_;
       int control_point_num_ = 0;
     };
 

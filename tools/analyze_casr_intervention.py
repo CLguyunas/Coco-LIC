@@ -37,6 +37,25 @@ REQUIRED_COLUMNS = {
     "primary_solver_usable",
     "fallback_attempted",
     "fallback_solver_usable",
+    "curvature_matching_enabled",
+    "curvature_valid",
+    "curvature_tangent_dimension",
+    "reference_curvature_max",
+    "target_curvature",
+    "recovery_curvature_min",
+    "recovery_curvature_median",
+    "recovery_curvature_max",
+    "added_information_min",
+    "added_information_median",
+    "added_information_max",
+    "counterfactual_enabled",
+    "counterfactual_solver_usable",
+    "counterfactual_total_increment_norm",
+    "counterfactual_projected_increment_norm",
+    "counterfactual_orthogonal_increment_norm",
+    "counterfactual_factor_residual_norm",
+    "projected_casr_over_counterfactual",
+    "orthogonal_casr_over_counterfactual",
 }
 
 INTEGER_COLUMNS = {
@@ -50,6 +69,10 @@ INTEGER_COLUMNS = {
     "primary_solver_usable",
     "fallback_attempted",
     "fallback_solver_usable",
+    "curvature_matching_enabled",
+    "curvature_valid",
+    "counterfactual_enabled",
+    "counterfactual_solver_usable",
 }
 
 FLOAT_COLUMNS = {
@@ -61,6 +84,20 @@ FLOAT_COLUMNS = {
     "pre_orthogonal_increment_norm",
     "post_projected_increment_norm",
     "post_orthogonal_increment_norm",
+    "reference_curvature_max",
+    "target_curvature",
+    "recovery_curvature_min",
+    "recovery_curvature_median",
+    "recovery_curvature_max",
+    "added_information_min",
+    "added_information_median",
+    "added_information_max",
+    "counterfactual_total_increment_norm",
+    "counterfactual_projected_increment_norm",
+    "counterfactual_orthogonal_increment_norm",
+    "counterfactual_factor_residual_norm",
+    "projected_casr_over_counterfactual",
+    "orthogonal_casr_over_counterfactual",
 }
 
 
@@ -106,6 +143,9 @@ def read_csv(path: Path) -> List[Dict[str, object]]:
                 for name in INTEGER_COLUMNS:
                     row[name] = int(str(raw[name]))
                 row["recovery_rank"] = int(str(raw["recovery_rank"]))
+                row["curvature_tangent_dimension"] = int(
+                    str(raw["curvature_tangent_dimension"])
+                )
                 for name in FLOAT_COLUMNS:
                     row[name] = float(str(raw[name]))
             except (TypeError, ValueError) as error:
@@ -146,6 +186,8 @@ def audit_rows(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
         fallback_attempted = int(row["fallback_attempted"])
         fallback_usable = int(row["fallback_solver_usable"])
         apply_to_estimator = int(row["apply_to_estimator"])
+        curvature_matching = int(row["curvature_matching_enabled"])
+        curvature_valid = int(row["curvature_valid"])
         for name in FLOAT_COLUMNS - {"scan_timestamp_s"}:
             if not math.isfinite(float(row[name])):
                 errors.append(f"line {index}: {name} is non-finite")
@@ -161,6 +203,16 @@ def audit_rows(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
             errors.append(f"line {index}: dry_run has a committed factor")
         if state == "applied" and not (factor_added and applied):
             errors.append(f"line {index}: applied state/flags disagree")
+        if factor_added and curvature_matching and not curvature_valid:
+            errors.append(
+                f"line {index}: curvature-matched factor lacks valid curvature"
+            )
+        if state in {"curvature_invalid", "curvature_sufficient"} and (
+            factor_added or applied
+        ):
+            errors.append(
+                f"line {index}: {state} unexpectedly changed the estimator"
+            )
         if state == "solver_failure_recovered":
             if not (factor_added and not applied and fallback_attempted and
                     fallback_usable):
@@ -173,18 +225,43 @@ def audit_rows(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
             )
 
     applied_rows = [row for row in rows if int(row["applied"]) == 1]
+    measurement_rows = [
+        row for row in rows
+        if int(row["eligible"]) == 1 or
+        str(row["state"]) == "curvature_sufficient"
+    ]
     projected_ratios = _ratios(
-        applied_rows,
+        measurement_rows,
         "post_projected_increment_norm",
         "pre_projected_increment_norm",
     )
     orthogonal_ratios = _ratios(
-        applied_rows,
+        measurement_rows,
         "post_orthogonal_increment_norm",
         "pre_orthogonal_increment_norm",
     )
-    if applied_rows and not projected_ratios:
-        warnings.append("applied rows have no nonzero pre projected increment")
+    if measurement_rows and not projected_ratios:
+        warnings.append("measured rows have no nonzero pre projected increment")
+
+    counterfactual_rows = [
+        row for row in applied_rows
+        if int(row["counterfactual_enabled"]) == 1 and
+        int(row["counterfactual_solver_usable"]) == 1
+    ]
+    projected_counterfactual_ratios = [
+        float(row["projected_casr_over_counterfactual"])
+        for row in counterfactual_rows
+        if math.isfinite(float(row["projected_casr_over_counterfactual"]))
+    ]
+    orthogonal_counterfactual_ratios = [
+        float(row["orthogonal_casr_over_counterfactual"])
+        for row in counterfactual_rows
+        if math.isfinite(float(row["orthogonal_casr_over_counterfactual"]))
+    ]
+    added_information = [
+        float(row["added_information_median"])
+        for row in rows if int(row["curvature_valid"]) == 1
+    ]
 
     return {
         "rows": len(rows),
@@ -209,6 +286,21 @@ def audit_rows(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
             "count": len(orthogonal_ratios),
             "median": _median(orthogonal_ratios),
             "p90": _quantile(orthogonal_ratios, 0.9),
+        },
+        "projected_casr_over_same_frame_baseline": {
+            "count": len(projected_counterfactual_ratios),
+            "median": _median(projected_counterfactual_ratios),
+            "p90": _quantile(projected_counterfactual_ratios, 0.9),
+        },
+        "orthogonal_casr_over_same_frame_baseline": {
+            "count": len(orthogonal_counterfactual_ratios),
+            "median": _median(orthogonal_counterfactual_ratios),
+            "p90": _quantile(orthogonal_counterfactual_ratios, 0.9),
+        },
+        "median_added_information": {
+            "count": len(added_information),
+            "median": _median(added_information),
+            "p90": _quantile(added_information, 0.9),
         },
         "errors": errors,
         "warnings": warnings,
@@ -267,7 +359,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Validate CASR intervention safety invariants and summarize "
-            "projected/orthogonal increment changes."
+            "curvature matching and same-frame baseline/CASR changes."
         )
     )
     parser.add_argument(
@@ -330,6 +422,18 @@ def main() -> int:
             print(
                 "  orthogonal post/pre="
                 f"{summary['orthogonal_post_over_pre']}"
+            )
+            print(
+                "  projected CASR/same-frame-baseline="
+                f"{summary['projected_casr_over_same_frame_baseline']}"
+            )
+            print(
+                "  orthogonal CASR/same-frame-baseline="
+                f"{summary['orthogonal_casr_over_same_frame_baseline']}"
+            )
+            print(
+                "  curvature-matched added information="
+                f"{summary['median_added_information']}"
             )
             for message in summary["errors"]:
                 print(f"  ERROR: {message}")

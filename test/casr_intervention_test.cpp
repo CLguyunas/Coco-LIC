@@ -35,6 +35,7 @@ namespace cocolic
     CasrInterventionConfig config;
     config.enabled = true;
     config.apply_to_estimator = false;
+    config.curvature_matching_enabled = false;
     config.base_information_weight = 4.0;
     const CasrShadowResult result = ReadyEnvironmentResult();
 
@@ -58,6 +59,7 @@ namespace cocolic
     CasrInterventionConfig config;
     config.enabled = true;
     config.apply_to_estimator = true;
+    config.curvature_matching_enabled = false;
 
     CasrShadowResult conflict = ReadyEnvironmentResult();
     conflict.route = CasrRoute::CoupledConflict;
@@ -73,6 +75,46 @@ namespace cocolic
         BuildCasrInterventionPlan(config, mismatch, 2.0, 10);
     EXPECT_FALSE(stale.eligible);
     EXPECT_EQ(stale.state, CasrInterventionState::RouteMismatch);
+  }
+
+  TEST(CasrInterventionPlan, CurvatureMatchingWeightsEachDirection)
+  {
+    CasrInterventionConfig config;
+    config.enabled = true;
+    config.apply_to_estimator = true;
+    config.curvature_matching_enabled = true;
+    config.curvature_target_relative_to_max = 6e-3;
+    config.curvature_max_added_relative_to_max = 2e-2;
+
+    CasrShadowResult result = ReadyEnvironmentResult();
+    result.recovery_rank = 2;
+    result.recovery_knot_basis = Eigen::MatrixXd::Zero(12, 2);
+    result.recovery_knot_basis(0, 0) = 1.0;
+    result.recovery_knot_basis(1, 1) = 1.0;
+    CasrInterventionPlan plan =
+        BuildCasrInterventionPlan(config, result, 2.0, 10);
+    ASSERT_TRUE(plan.eligible);
+
+    CasrCurvatureEstimate estimate;
+    estimate.valid = true;
+    estimate.tangent_dimension = 12;
+    estimate.reference_curvature_max = 1000.0;
+    estimate.recovery_curvatures = Eigen::Vector2d(1.0, 8.0);
+    estimate.recovery_eigenvectors = Eigen::Matrix2d::Identity();
+    ASSERT_TRUE(FinalizeCasrInterventionPlanWithCurvature(
+        config, estimate, plan));
+    ASSERT_EQ(plan.effective_information_weights.size(), 2);
+    EXPECT_NEAR(plan.effective_information_weights[0], 3.0, 1e-12);
+    EXPECT_DOUBLE_EQ(plan.effective_information_weights[1], 0.0);
+    EXPECT_NEAR(plan.sqrt_information_weights[0], std::sqrt(3.0), 1e-12);
+    EXPECT_DOUBLE_EQ(plan.sqrt_information_weights[1], 0.0);
+
+    plan = BuildCasrInterventionPlan(config, result, 2.0, 10);
+    estimate.recovery_curvatures = Eigen::Vector2d(7.0, 8.0);
+    EXPECT_FALSE(FinalizeCasrInterventionPlanWithCurvature(
+        config, estimate, plan));
+    EXPECT_FALSE(plan.eligible);
+    EXPECT_EQ(plan.state, CasrInterventionState::CurvatureSufficient);
   }
 
   TEST(CasrInterventionPlan, RejectsDiagnosticsCopyEvenWhenOtherwiseReady)
@@ -95,6 +137,7 @@ namespace cocolic
     CasrInterventionConfig config;
     config.enabled = true;
     config.apply_to_estimator = true;
+    config.curvature_matching_enabled = false;
     config.base_information_weight = 1000.0;
     config.max_effective_information_weight = 7.0;
     CasrShadowResult result = ReadyEnvironmentResult();
@@ -187,6 +230,34 @@ namespace cocolic
       EXPECT_NEAR(rotation_jacobian(0, axis), numerical, 2e-6);
     }
     EXPECT_DOUBLE_EQ(rotation_jacobian(0, 3), 0.0);
+  }
+
+  TEST(CasrSubspaceFactor, AppliesIndependentDirectionWeights)
+  {
+    using analytic_derivative::CasrSubspaceFactor;
+    using SO3d = Sophus::SO3<double>;
+
+    Eigen::MatrixXd basis = Eigen::MatrixXd::Zero(6, 2);
+    basis(0, 0) = 1.0;
+    basis(3, 1) = 1.0;
+    Eigen::aligned_vector<SO3d> reference_rotations(1, SO3d());
+    Eigen::aligned_vector<Eigen::Vector3d> reference_positions(
+        1, Eigen::Vector3d::Zero());
+    CasrSubspaceFactor factor(
+        basis, reference_rotations, reference_positions, 3.0,
+        Eigen::Vector2d(2.0, 4.0));
+
+    Eigen::aligned_vector<SO3d> rotations(
+        1, SO3d::exp(Eigen::Vector3d(0.1, 0.0, 0.0)));
+    Eigen::aligned_vector<Eigen::Vector3d> positions(
+        1, Eigen::Vector3d(0.4, 0.0, 0.0));
+    std::vector<double const *> parameter_blocks{
+        rotations[0].data(), positions[0].data()};
+    Eigen::Vector2d residual;
+    ASSERT_TRUE(factor.Evaluate(parameter_blocks.data(), residual.data(),
+                                nullptr));
+    EXPECT_NEAR(residual[0], 0.6, 1e-10);
+    EXPECT_NEAR(residual[1], 1.6, 1e-12);
   }
 
   TEST(CasrSubspaceFactor, UsesInterleavedKnotCoordinatesWithGroupedBlocks)
