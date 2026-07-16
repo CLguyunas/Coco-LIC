@@ -31,88 +31,55 @@ already contains this block and enables it by default on this branch.
 ```yaml
 dso_detect_only:
     enabled: true
-    output_csv: true
-    use_correspondence_scale: true
-    min_correspondences: 30
-    analyze_every_n_scans: 1
-    print_every_n_scans: 20
-    relative_eigenvalue_threshold: 1.0e-3
     enter_relative_eigenvalue_threshold: 3.0e-3
     exit_relative_eigenvalue_threshold: 6.0e-3
-    enter_consecutive_scans: 10
-    exit_consecutive_scans: 10
-    min_characteristic_range: 1.0
-    max_characteristic_range: 100.0
-    support_enabled: true
-    support_reference_samples_per_interval: 32
-    support_max_control_points: 32
     support_enter_quality_threshold: 2.0e-2
     support_exit_quality_threshold: 5.0e-2
-    support_enter_consecutive_scans: 10
-    support_exit_consecutive_scans: 10
-    support_injection:
-        enabled: false
-        diagnostics_only: true
-        output_csv: true
-        mode: timestamp_compression
-        severity: 0.5
-        phase_start: 0.0
-        phase_end: 1.0
-        random_seed: 42
     casr_shadow:
-        enabled: true
-        shadow_only: true
-        output_csv: true
-        environment_relative_threshold: 6.0e-3
-        support_basis_relative_singular_threshold: 1.0e-6
-        lift_regularization: 1.0e-6
         principal_cosine_threshold: 7.0e-1
-        route_consecutive_scans: 3
-        projector_consecutive_scans: 3
         projector_similarity_threshold: 8.0e-1
-        activation_scheduler:
-            enabled: true
-            environment_full_confidence_threshold: 3.0e-3
-            environment_zero_confidence_threshold: 6.0e-3
-            support_full_confidence_threshold: 2.0e-2
-            support_zero_confidence_threshold: 5.0e-2
-            projector_full_confidence: 9.5e-1
-            principal_full_confidence: 9.0e-1
-            persistence_full_scans: 5
-            enter_confidence: 2.5e-1
-            exit_confidence: 1.0e-1
-            rise_time_s: 5.0e-1
-            fall_time_s: 2.0e-1
-            max_dt_s: 5.0e-1
     casr_intervention:
         enabled: true
         apply_to_estimator: false
-        output_csv: true
-        curvature_matching_enabled: true
-        curvature_target_relative_to_max: 6.0e-3
-        curvature_max_added_relative_to_max: 2.0e-2
-        curvature_gain: 1.0
-        curvature_min_reference: 1.0e-9
-        counterfactual_validation: true
-        counterfactual_ratio_denominator_floor: 1.0e-6
-        # Legacy fixed-weight mode only:
-        base_information_weight: 1.0
-        max_effective_information_weight: 1.0e+2
-        min_activation_strength: 5.0e-2
-        max_activation_strength: 1.0
-        max_control_points: 32
-        max_recovery_rank: 32
-        max_basis_orthogonality_error: 1.0e-6
+        curvature_gain: 1.0e-2
 ```
 
+This is the complete production configuration interface. It contains three mode
+switches and seven numeric method parameters:
+
+| YAML field | Role in the paper | Default |
+|---|---|---:|
+| `enabled` | enable the complete read-only diagnosis/recovery pipeline | `true` |
+| environment enter/exit thresholds | 6DoF geometry hysteresis | `0.003/0.006` |
+| support enter/exit thresholds | spline-support hysteresis | `0.02/0.05` |
+| `principal_cosine_threshold` | reliable common-direction decision | `0.7` |
+| `projector_similarity_threshold` | inter-scan recovery-subspace continuity | `0.8` |
+| intervention `enabled` | create dry/armed intervention audit | `true` |
+| `apply_to_estimator` | `false`: dry run; `true`: armed factor | `false` |
+| `curvature_gain` | curvature-deficit recovery strength | `0.01` |
+
+For the thesis, select the six diagnosis/subspace thresholds on a calibration
+set and then keep them unchanged across every compared sequence. Only
+`curvature_gain` is swept in the intervention ablation; `0.01` is the current
+validated starting value. The two boolean intervention fields define the
+baseline/dry/armed experiment mode and are not fitted parameters.
+
+Everything else is fixed in `src/degeneracy/dso_fixed_config.h` or derived
+from the thresholds above. In particular, CSV output, evidence counts,
+persistence lengths, range clamps, numerical rank/regularization tolerances,
+capacity limits, scheduler confidence/slew settings, curvature target/cap,
+counterfactual solving, and failure guards are no longer YAML-adjustable.
+The scheduler environment/support anchors reuse the four detector thresholds,
+and the CASR environment routing threshold reuses the environment exit value.
+Old fixed keys are ignored with a startup warning, so a stale YAML file cannot
+silently alter the method.
+
 When the block is absent or `enabled` is `false`, no analysis is performed.
-Setting only `support_enabled: false` preserves the environment-space detector.
-The controlled injector is off by default and additionally requires
-`diagnostics_only: true`; the implementation refuses any other setting.
-The CASR evaluator remains restricted to `shadow_only: true`: it emits a
-candidate basis and scheduler strength but has no estimator write path. The
-separate Stage-5 intervention revalidates that output before it may add one
-ephemeral factor.
+When it is enabled, exact support analysis, CASR shadow recovery, the scheduler,
+and all audit CSV streams are enabled together. These components remain
+read-only; the estimator changes only when both intervention switches are
+true. The separate Stage-5 gate still revalidates the candidate before adding
+one ephemeral factor.
 
 ## Output
 
@@ -135,14 +102,14 @@ The environment temporal fields are:
 - `enter_counter` and `exit_counter`: consecutive-scan evidence accumulated
   for the next state transition.
 
-`relative_eigenvalue_threshold` remains a legacy hard diagnostic threshold. It
-only produces `weak_direction_num`; the temporal state instead enters when the
+The fixed legacy relative-eigenvalue threshold (`0.001`) only produces
+`weak_direction_num`; the temporal state instead enters when the
 smallest relative eigenvalue remains below
-`enter_relative_eigenvalue_threshold` for `enter_consecutive_scans`, and exits
+`enter_relative_eigenvalue_threshold` for 10 analyzed scans, and exits
 when it remains above `exit_relative_eigenvalue_threshold` for
-`exit_consecutive_scans`. Values between the thresholds preserve the current
-state. Persistence is counted in analyzed scans, so increasing
-`analyze_every_n_scans` increases the wall-clock delay.
+10 analyzed scans. Values between the thresholds preserve the current state.
+Every scan is analyzed; the persistence length is an implementation constant,
+not a dataset-specific tuning variable.
 
 The environment state order is expressed in the map frame:
 
@@ -230,6 +197,25 @@ before a second spline-support analysis. The original correspondences and
 timestamps still feed the environment diagnostic, the real spline-support
 diagnostic, and the estimator without modification.
 
+Do not place the injector in the production configuration. Add this optional
+block only for the controlled Stage-2 validation experiment:
+
+```yaml
+dso_detect_only:
+    # ...the production parameters above...
+    support_injection:
+        enabled: true
+        mode: timestamp_compression
+        severity: 0.75
+        phase_start: 0.0
+        phase_end: 1.0
+        random_seed: 42
+```
+
+These fields describe a synthetic experimental condition rather than online
+method hyperparameters. Injection is diagnostic-only by construction; there is
+no `diagnostics_only` switch or estimator write path.
+
 When enabled, a second file is written next to the main CSV:
 
 ```text
@@ -302,12 +288,11 @@ z = [r*dtheta_0, dp_0, ..., r*dtheta_(K-1), dp_(K-1)],
 where `r` is the same characteristic range used by the environment detector.
 The generalized spline modes are transformed to `z` and Euclidean-
 orthonormalized to obtain the support weak basis `U_s^K`. The support-quality
-threshold still decides which physical modes are weak;
-`support_basis_relative_singular_threshold` only removes numerical linear
-dependence.
+threshold still decides which physical modes are weak; the fixed `1e-6`
+relative singular-value tolerance only removes numerical linear dependence.
 
 The environment weak basis `U_e` remains the 6DoF map-frame eigenvectors whose
-relative eigenvalues are inside `environment_relative_threshold`. For every
+relative eigenvalues are inside the detector exit threshold. For every
 uniform reference timestamp `t_j`, CASR constructs the exact mapping `B_j`
 from scaled NURBS knot perturbations to the scaled map-frame LiDAR pose. Its
 rotation block converts the NURBS right perturbation to the detector's
@@ -318,8 +303,8 @@ lever arm. Each environment direction is lifted over the entire scan by
 x_e = (mean_j B_j^T B_j + lambda I)^(-1) mean_j B_j^T e,
 ```
 
-with `lambda` controlled by `lift_regularization` relative to the largest
-reference-information eigenvalue. Orthonormalizing the lifted columns gives
+with a fixed `lambda=1e-6` relative to the largest reference-information
+eigenvalue. Orthonormalizing the lifted columns gives
 `U_e^K`. `environment_lift_residual` records how well one knot perturbation
 reproduces the same map-frame direction over the scan.
 
@@ -444,9 +429,9 @@ target strength, slewed activation strength, and elapsed time. The original
 81-column observability CSV and 45-column injection CSV remain unchanged.
 
 `CASR-Shadow` still does not modify Ceres, the spline, measurements, the map,
-or the marginalization prior. A configuration with `shadow_only: false` is
-refused. Its output is consumed only by the separately armed intervention
-described next.
+or the marginalization prior. Shadow-only execution is enforced by the class
+boundary rather than a YAML promise. Its output is consumed only by the
+separately armed intervention described next.
 
 ## Stage 5: CASR estimator intervention
 
@@ -482,8 +467,8 @@ Thus every recovery direction receives only its measured curvature deficit;
 directions already above the target receive zero added information. If all
 directions are sufficient the frame is logged as `curvature_sufficient` and no
 factor is added. Invalid or near-zero reference curvature fails closed as
-`curvature_invalid`. The legacy scalar `base_information_weight` path remains
-available only when `curvature_matching_enabled: false`.
+`curvature_invalid`. Production configuration always uses curvature matching;
+the legacy scalar path remains internal only for compatibility tests.
 
 Only diagnosed recovery coordinates are damped. Updates in the orthogonal,
 observable complement remain unconstrained by this factor. The SO(3) Jacobian
@@ -502,7 +487,7 @@ routes, diagnostics-copy results, or missing references always produce zero
 estimator factors. The provenance check is repeated at the estimator boundary;
 it does not rely only on the caller selecting the real result.
 
-With `counterfactual_validation: true`, every parameter block registered in
+Counterfactual validation is fixed on: every parameter block registered in
 the final Ceres problem is snapshotted. The unmodified baseline is solved and
 measured first; then the exact pre-solve snapshot is restored and the CASR
 problem is solved. This produces a same-frame, same-initial-state comparison.

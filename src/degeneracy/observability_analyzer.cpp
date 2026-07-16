@@ -4,6 +4,8 @@
 
 #include <degeneracy/observability_analyzer.h>
 
+#include <degeneracy/dso_fixed_config.h>
+
 #include <odom/factor/analytic_diff/so3_spline_view.h>
 #include <utils/sophus_utils.hpp>
 
@@ -14,6 +16,7 @@
 #include <array>
 #include <cmath>
 #include <iomanip>
+#include <initializer_list>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -34,6 +37,38 @@ namespace cocolic
         return node[key].as<T>();
       }
       return default_value;
+    }
+
+    void WarnIgnoredFixedKeys(
+        const YAML::Node &node, const char *scope,
+        std::initializer_list<const char *> keys)
+    {
+      if (!node)
+      {
+        return;
+      }
+      bool wrote_prefix = false;
+      for (const char *key : keys)
+      {
+        if (node[key])
+        {
+          if (!wrote_prefix)
+          {
+            std::cerr << "[DSO-Config] Ignoring fixed YAML keys under '"
+                      << scope << "': ";
+            wrote_prefix = true;
+          }
+          else
+          {
+            std::cerr << ", ";
+          }
+          std::cerr << key;
+        }
+      }
+      if (wrote_prefix)
+      {
+        std::cerr << ". Remove them from the configuration.\n";
+      }
     }
 
     const char *DegeneracyCauseName(int cause)
@@ -60,18 +95,13 @@ namespace cocolic
       : trajectory_(std::move(trajectory))
   {
     enabled_ = ReadValue<bool>(node, "enabled", false);
-    output_csv_ = ReadValue<bool>(node, "output_csv", true);
-    use_correspondence_scale_ =
-        ReadValue<bool>(node, "use_correspondence_scale", true);
-    min_correspondences_ =
-        std::max(1, ReadValue<int>(node, "min_correspondences", 30));
-    analyze_every_n_scans_ =
-        std::max(1, ReadValue<int>(node, "analyze_every_n_scans", 1));
-    print_every_n_scans_ =
-        std::max(1, ReadValue<int>(node, "print_every_n_scans", 20));
+    output_csv_ = dso_fixed::kOutputCsv;
+    use_correspondence_scale_ = dso_fixed::kUseCorrespondenceScale;
+    min_correspondences_ = dso_fixed::kMinCorrespondences;
+    analyze_every_n_scans_ = dso_fixed::kAnalyzeEveryNScans;
+    print_every_n_scans_ = dso_fixed::kPrintEveryNScans;
     relative_eigenvalue_threshold_ =
-        std::max(0.0, ReadValue<double>(
-                          node, "relative_eigenvalue_threshold", 1e-3));
+        dso_fixed::kLegacyRelativeEigenvalueThreshold;
     enter_relative_eigenvalue_threshold_ =
         std::max(0.0, ReadValue<double>(
                           node, "enter_relative_eigenvalue_threshold", 3e-3));
@@ -80,42 +110,31 @@ namespace cocolic
                  ReadValue<double>(
                      node, "exit_relative_eigenvalue_threshold", 6e-3));
     enter_consecutive_scans_ =
-        std::max(1, ReadValue<int>(node, "enter_consecutive_scans", 10));
-    exit_consecutive_scans_ =
-        std::max(1, ReadValue<int>(node, "exit_consecutive_scans", 10));
-    min_characteristic_range_ =
-        std::max(1e-3, ReadValue<double>(
-                           node, "min_characteristic_range", 1.0));
-    max_characteristic_range_ =
-        std::max(min_characteristic_range_,
-                 ReadValue<double>(node, "max_characteristic_range", 100.0));
+        dso_fixed::kDetectorEnterConsecutiveScans;
+    exit_consecutive_scans_ = dso_fixed::kDetectorExitConsecutiveScans;
+    min_characteristic_range_ = dso_fixed::kMinCharacteristicRange;
+    max_characteristic_range_ = dso_fixed::kMaxCharacteristicRange;
 
-    support_enabled_ =
-        ReadValue<bool>(node, "support_enabled", true);
-    support_reference_samples_per_interval_ = std::max(
-        8, ReadValue<int>(node,
-                          "support_reference_samples_per_interval", 32));
-    support_max_control_points_ = std::max(
-        4, ReadValue<int>(node, "support_max_control_points", 32));
+    support_enabled_ = dso_fixed::kSupportEnabled;
+    support_reference_samples_per_interval_ =
+        dso_fixed::kSupportReferenceSamplesPerInterval;
+    support_max_control_points_ = dso_fixed::kSupportMaxControlPoints;
     support_enter_quality_threshold_ = std::max(
         0.0, ReadValue<double>(
                  node, "support_enter_quality_threshold", 2e-2));
     support_exit_quality_threshold_ = std::max(
         support_enter_quality_threshold_,
         ReadValue<double>(node, "support_exit_quality_threshold", 5e-2));
-    support_enter_consecutive_scans_ = std::max(
-        1, ReadValue<int>(node, "support_enter_consecutive_scans", 10));
-    support_exit_consecutive_scans_ = std::max(
-        1, ReadValue<int>(node, "support_exit_consecutive_scans", 10));
+    support_enter_consecutive_scans_ =
+        dso_fixed::kSupportEnterConsecutiveScans;
+    support_exit_consecutive_scans_ =
+        dso_fixed::kSupportExitConsecutiveScans;
 
     const YAML::Node injection_node =
         node ? node["support_injection"] : YAML::Node();
     const bool injection_requested =
         ReadValue<bool>(injection_node, "enabled", false);
-    const bool diagnostics_only =
-        ReadValue<bool>(injection_node, "diagnostics_only", true);
-    support_injection_output_csv_ =
-        ReadValue<bool>(injection_node, "output_csv", true);
+    support_injection_output_csv_ = dso_fixed::kInjectionOutputCsv;
     const std::string injection_mode_name = ReadValue<std::string>(
         injection_node, "mode", "timestamp_compression");
     SupportInjectionMode injection_mode = SupportInjectionMode::Disabled;
@@ -123,88 +142,70 @@ namespace cocolic
         SupportDegradationInjector::ParseMode(injection_mode_name,
                                                injection_mode);
     SupportInjectionConfig injection_config;
-    injection_config.enabled = injection_requested && diagnostics_only &&
+    // This object has no estimator write path; injection is diagnostic-only
+    // by construction rather than by a user-settable promise.
+    injection_config.enabled = enabled_ && injection_requested &&
                                support_enabled_ && injection_mode_valid;
     injection_config.mode = injection_mode;
     injection_config.severity =
-        ReadValue<double>(injection_node, "severity", 0.5);
+        ReadValue<double>(injection_node, "severity",
+                          dso_fixed::kInjectionDefaultSeverity);
     injection_config.phase_start =
-        ReadValue<double>(injection_node, "phase_start", 0.0);
+        ReadValue<double>(injection_node, "phase_start",
+                          dso_fixed::kInjectionDefaultPhaseStart);
     injection_config.phase_end =
-        ReadValue<double>(injection_node, "phase_end", 1.0);
+        ReadValue<double>(injection_node, "phase_end",
+                          dso_fixed::kInjectionDefaultPhaseEnd);
     injection_config.random_seed =
-        ReadValue<uint64_t>(injection_node, "random_seed", 42);
+        ReadValue<uint64_t>(injection_node, "random_seed",
+                            dso_fixed::kInjectionDefaultRandomSeed);
     support_injector_.Configure(injection_config);
     support_injection_enabled_ = support_injector_.Enabled();
 
     const YAML::Node casr_node =
         node ? node["casr_shadow"] : YAML::Node();
-    const bool casr_requested =
-        ReadValue<bool>(casr_node, "enabled", false);
-    const bool casr_shadow_only =
-        ReadValue<bool>(casr_node, "shadow_only", true);
-    casr_shadow_output_csv_ =
-        ReadValue<bool>(casr_node, "output_csv", true);
+    casr_shadow_output_csv_ = dso_fixed::kCasrShadowOutputCsv;
     CasrShadowConfig casr_config;
-    casr_config.enabled = casr_requested && casr_shadow_only &&
-                          support_enabled_;
-    casr_config.environment_relative_threshold = ReadValue<double>(
-        casr_node, "environment_relative_threshold",
-        exit_relative_eigenvalue_threshold_);
+    casr_config.enabled = enabled_ && support_enabled_;
+    // Reuse the detector exit band instead of exposing a duplicated
+    // environment threshold.
+    casr_config.environment_relative_threshold =
+        exit_relative_eigenvalue_threshold_;
     casr_config.support_basis_relative_singular_threshold =
-        ReadValue<double>(casr_node,
-                          "support_basis_relative_singular_threshold",
-                          1e-6);
-    casr_config.lift_regularization = ReadValue<double>(
-        casr_node, "lift_regularization", 1e-6);
+        dso_fixed::kSupportBasisRelativeSingularThreshold;
+    casr_config.lift_regularization = dso_fixed::kLiftRegularization;
     casr_config.principal_cosine_threshold = ReadValue<double>(
         casr_node, "principal_cosine_threshold", 7e-1);
-    casr_config.route_consecutive_scans = ReadValue<int>(
-        casr_node, "route_consecutive_scans", 3);
-    casr_config.projector_consecutive_scans = ReadValue<int>(
-        casr_node, "projector_consecutive_scans", 3);
+    casr_config.route_consecutive_scans =
+        dso_fixed::kRouteConsecutiveScans;
+    casr_config.projector_consecutive_scans =
+        dso_fixed::kProjectorConsecutiveScans;
     casr_config.projector_similarity_threshold = ReadValue<double>(
         casr_node, "projector_similarity_threshold", 8e-1);
-    const YAML::Node scheduler_node =
-        casr_node ? casr_node["activation_scheduler"] : YAML::Node();
-    casr_config.scheduler_enabled = casr_config.enabled &&
-        ReadValue<bool>(scheduler_node, "enabled", true);
+    casr_config.scheduler_enabled = casr_config.enabled;
     casr_config.scheduler_environment_full_confidence_threshold =
-        ReadValue<double>(
-            scheduler_node,
-            "environment_full_confidence_threshold",
-            enter_relative_eigenvalue_threshold_);
+        enter_relative_eigenvalue_threshold_;
     casr_config.scheduler_environment_zero_confidence_threshold =
-        ReadValue<double>(
-            scheduler_node,
-            "environment_zero_confidence_threshold",
-            exit_relative_eigenvalue_threshold_);
+        exit_relative_eigenvalue_threshold_;
     casr_config.scheduler_support_full_confidence_threshold =
-        ReadValue<double>(scheduler_node,
-                          "support_full_confidence_threshold",
-                          support_enter_quality_threshold_);
+        support_enter_quality_threshold_;
     casr_config.scheduler_support_zero_confidence_threshold =
-        ReadValue<double>(scheduler_node,
-                          "support_zero_confidence_threshold",
-                          support_exit_quality_threshold_);
+        support_exit_quality_threshold_;
     casr_config.scheduler_projector_full_confidence =
-        ReadValue<double>(scheduler_node,
-                          "projector_full_confidence", 9.5e-1);
+        dso_fixed::kSchedulerProjectorFullConfidence;
     casr_config.scheduler_principal_full_confidence =
-        ReadValue<double>(scheduler_node,
-                          "principal_full_confidence", 9e-1);
-    casr_config.scheduler_persistence_full_scans = ReadValue<int>(
-        scheduler_node, "persistence_full_scans", 5);
-    casr_config.scheduler_enter_confidence = ReadValue<double>(
-        scheduler_node, "enter_confidence", 2.5e-1);
-    casr_config.scheduler_exit_confidence = ReadValue<double>(
-        scheduler_node, "exit_confidence", 1e-1);
-    casr_config.scheduler_rise_time_s = ReadValue<double>(
-        scheduler_node, "rise_time_s", 5e-1);
-    casr_config.scheduler_fall_time_s = ReadValue<double>(
-        scheduler_node, "fall_time_s", 2e-1);
-    casr_config.scheduler_max_dt_s = ReadValue<double>(
-        scheduler_node, "max_dt_s", 5e-1);
+        dso_fixed::kSchedulerPrincipalFullConfidence;
+    casr_config.scheduler_persistence_full_scans =
+        dso_fixed::kSchedulerPersistenceFullScans;
+    casr_config.scheduler_enter_confidence =
+        dso_fixed::kSchedulerEnterConfidence;
+    casr_config.scheduler_exit_confidence =
+        dso_fixed::kSchedulerExitConfidence;
+    casr_config.scheduler_rise_time_s =
+        dso_fixed::kSchedulerRiseTimeSeconds;
+    casr_config.scheduler_fall_time_s =
+        dso_fixed::kSchedulerFallTimeSeconds;
+    casr_config.scheduler_max_dt_s = dso_fixed::kSchedulerMaxDtSeconds;
     casr_shadow_evaluator_.Configure(casr_config);
     casr_shadow_enabled_ = casr_shadow_evaluator_.Enabled();
 
@@ -233,29 +234,52 @@ namespace cocolic
       return;
     }
 
-    if (injection_requested && !diagnostics_only)
-    {
-      std::cerr << "[DSO-DetectOnly] support_injection refused: "
-                   "diagnostics_only must remain true.\n";
-    }
-    if (injection_requested && !support_enabled_)
-    {
-      std::cerr << "[DSO-DetectOnly] support_injection disabled because "
-                   "support_enabled is false.\n";
-    }
+    WarnIgnoredFixedKeys(
+        node, "dso_detect_only",
+        {"output_csv", "use_correspondence_scale", "min_correspondences",
+         "analyze_every_n_scans", "print_every_n_scans",
+         "relative_eigenvalue_threshold", "enter_consecutive_scans",
+         "exit_consecutive_scans", "min_characteristic_range",
+         "max_characteristic_range", "support_enabled",
+         "support_reference_samples_per_interval",
+         "support_max_control_points", "support_enter_consecutive_scans",
+         "support_exit_consecutive_scans"});
+    WarnIgnoredFixedKeys(injection_node, "support_injection",
+                         {"diagnostics_only", "output_csv"});
+    WarnIgnoredFixedKeys(
+        casr_node, "casr_shadow",
+        {"enabled", "shadow_only", "output_csv",
+         "environment_relative_threshold",
+         "support_basis_relative_singular_threshold", "lift_regularization",
+         "route_consecutive_scans", "projector_consecutive_scans",
+         "support_pose_relative_threshold"});
+    const YAML::Node scheduler_node =
+        casr_node ? casr_node["activation_scheduler"] : YAML::Node();
+    WarnIgnoredFixedKeys(
+        scheduler_node, "casr_shadow.activation_scheduler",
+        {"enabled", "environment_full_confidence_threshold",
+         "environment_zero_confidence_threshold",
+         "support_full_confidence_threshold",
+         "support_zero_confidence_threshold", "projector_full_confidence",
+         "principal_full_confidence", "persistence_full_scans",
+         "enter_confidence", "exit_confidence", "rise_time_s",
+         "fall_time_s", "max_dt_s"});
+    WarnIgnoredFixedKeys(
+        intervention_node, "casr_intervention",
+        {"output_csv", "curvature_matching_enabled",
+         "curvature_target_relative_to_max",
+         "curvature_max_added_relative_to_max", "curvature_min_reference",
+         "counterfactual_validation",
+         "counterfactual_ratio_denominator_floor",
+         "base_information_weight", "max_effective_information_weight",
+         "min_activation_strength", "max_activation_strength",
+         "max_control_points", "max_recovery_rank",
+         "max_basis_orthogonality_error"});
+
     if (injection_requested && !injection_mode_valid)
     {
       std::cerr << "[DSO-DetectOnly] support_injection disabled: unknown "
                 << "mode '" << injection_mode_name << "'.\n";
-    }
-    if (casr_requested && !casr_shadow_only)
-    {
-      std::cerr << "[CASR-Shadow] refused: shadow_only must remain true.\n";
-    }
-    if (casr_requested && !support_enabled_)
-    {
-      std::cerr << "[CASR-Shadow] disabled because support_enabled is "
-                   "false.\n";
     }
     if (requested_intervention_config.enabled &&
         !casr_intervention_config_.enabled)
@@ -264,15 +288,6 @@ namespace cocolic
                    "CASR shadow, support analysis, and the activation "
                    "scheduler must all be enabled.\n";
     }
-    if (casr_requested && casr_node["support_pose_relative_threshold"] &&
-        !casr_node["support_basis_relative_singular_threshold"])
-    {
-      std::cerr
-          << "[CASR-Shadow] support_pose_relative_threshold belongs to "
-             "CASR-v1 and is ignored. CASR-v2 uses the default "
-             "support_basis_relative_singular_threshold=1e-6.\n";
-    }
-
     csv_path_ = output_prefix + "_dso_observability.csv";
     if (output_csv_)
     {
@@ -396,6 +411,11 @@ namespace cocolic
                 << ",curvature_target/max="
                 << casr_intervention_config_
                        .curvature_target_relative_to_max
+                << "/"
+                << casr_intervention_config_
+                       .curvature_max_added_relative_to_max
+                << ",curvature_gain="
+                << casr_intervention_config_.curvature_gain
                 << ",counterfactual="
                 << casr_intervention_config_.counterfactual_validation
                 << ",activation="

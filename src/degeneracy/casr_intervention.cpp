@@ -98,46 +98,15 @@ namespace cocolic
       const YAML::Node &node)
   {
     CasrInterventionConfig config;
+    // Only experiment mode and the single recovery-strength hyperparameter
+    // are public configuration. All numerical safeguards and the curvature
+    // target live in dso_fixed_config.h and cannot be overridden by YAML.
     config.enabled = ReadValue<bool>(node, "enabled", false);
     config.apply_to_estimator =
         ReadValue<bool>(node, "apply_to_estimator", false);
-    config.output_csv = ReadValue<bool>(node, "output_csv", true);
-    config.base_information_weight = std::max(
-        0.0, ReadFiniteDouble(node, "base_information_weight", 1.0));
-    config.max_effective_information_weight = std::max(
-        0.0, ReadFiniteDouble(
-                 node, "max_effective_information_weight", 100.0));
-    config.curvature_matching_enabled =
-        ReadValue<bool>(node, "curvature_matching_enabled", true);
-    config.curvature_target_relative_to_max = std::max(
-        0.0, ReadFiniteDouble(
-                 node, "curvature_target_relative_to_max", 6e-3));
-    config.curvature_max_added_relative_to_max = std::max(
-        0.0, ReadFiniteDouble(
-                 node, "curvature_max_added_relative_to_max", 2e-2));
     config.curvature_gain = std::max(
-        0.0, ReadFiniteDouble(node, "curvature_gain", 1.0));
-    config.curvature_min_reference = std::max(
-        0.0, ReadFiniteDouble(
-                 node, "curvature_min_reference", 1e-9));
-    config.counterfactual_validation =
-        ReadValue<bool>(node, "counterfactual_validation", true);
-    config.counterfactual_ratio_denominator_floor = std::max(
-        1e-12, ReadFiniteDouble(
-                   node, "counterfactual_ratio_denominator_floor", 1e-6));
-    config.min_activation_strength = std::clamp(
-        ReadFiniteDouble(node, "min_activation_strength", 5e-2),
-        0.0, 1.0);
-    config.max_activation_strength = std::clamp(
-        ReadFiniteDouble(node, "max_activation_strength", 1.0),
-        config.min_activation_strength, 1.0);
-    config.max_control_points = std::max(
-        4, ReadValue<int>(node, "max_control_points", 32));
-    config.max_recovery_rank = std::max(
-        1, ReadValue<int>(node, "max_recovery_rank", 32));
-    config.max_basis_orthogonality_error = std::max(
-        0.0, ReadFiniteDouble(
-                 node, "max_basis_orthogonality_error", 1e-6));
+        0.0, ReadFiniteDouble(node, "curvature_gain",
+                              dso_fixed::kDefaultCurvatureGain));
     return config;
   }
 

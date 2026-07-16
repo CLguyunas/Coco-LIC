@@ -30,6 +30,69 @@ namespace cocolic
     }
   } // namespace
 
+  TEST(CasrInterventionConfig, ExposesOnlyModeSwitchesAndCurvatureGain)
+  {
+    const CasrInterventionConfig defaults =
+        ReadCasrInterventionConfig(YAML::Node());
+    EXPECT_DOUBLE_EQ(defaults.curvature_gain,
+                     dso_fixed::kDefaultCurvatureGain);
+
+    const YAML::Node node = YAML::Load(R"(
+enabled: true
+apply_to_estimator: true
+curvature_gain: 0.02
+output_csv: false
+curvature_matching_enabled: false
+curvature_target_relative_to_max: 0.9
+curvature_max_added_relative_to_max: 0.9
+curvature_min_reference: 1.0
+counterfactual_validation: false
+counterfactual_ratio_denominator_floor: 1.0
+base_information_weight: 99.0
+max_effective_information_weight: 99.0
+min_activation_strength: 0.9
+max_activation_strength: 0.9
+max_control_points: 4
+max_recovery_rank: 1
+max_basis_orthogonality_error: 0.5
+)");
+
+    const CasrInterventionConfig config =
+        ReadCasrInterventionConfig(node);
+    EXPECT_TRUE(config.enabled);
+    EXPECT_TRUE(config.apply_to_estimator);
+    EXPECT_DOUBLE_EQ(config.curvature_gain, 0.02);
+
+    // Former YAML keys are implementation constants and cannot override the
+    // production path.
+    EXPECT_EQ(config.output_csv, dso_fixed::kInterventionOutputCsv);
+    EXPECT_EQ(config.curvature_matching_enabled,
+              dso_fixed::kCurvatureMatchingEnabled);
+    EXPECT_DOUBLE_EQ(config.curvature_target_relative_to_max,
+                     dso_fixed::kCurvatureTargetRelativeToMax);
+    EXPECT_DOUBLE_EQ(config.curvature_max_added_relative_to_max,
+                     dso_fixed::kCurvatureMaxAddedRelativeToMax);
+    EXPECT_DOUBLE_EQ(config.curvature_min_reference,
+                     dso_fixed::kCurvatureMinReference);
+    EXPECT_EQ(config.counterfactual_validation,
+              dso_fixed::kCounterfactualValidation);
+    EXPECT_DOUBLE_EQ(config.counterfactual_ratio_denominator_floor,
+                     dso_fixed::kCounterfactualRatioDenominatorFloor);
+    EXPECT_DOUBLE_EQ(config.base_information_weight,
+                     dso_fixed::kLegacyBaseInformationWeight);
+    EXPECT_DOUBLE_EQ(config.max_effective_information_weight,
+                     dso_fixed::kLegacyMaxEffectiveInformationWeight);
+    EXPECT_DOUBLE_EQ(config.min_activation_strength,
+                     dso_fixed::kMinActivationStrength);
+    EXPECT_DOUBLE_EQ(config.max_activation_strength,
+                     dso_fixed::kMaxActivationStrength);
+    EXPECT_EQ(config.max_control_points,
+              dso_fixed::kInterventionMaxControlPoints);
+    EXPECT_EQ(config.max_recovery_rank, dso_fixed::kMaxRecoveryRank);
+    EXPECT_DOUBLE_EQ(config.max_basis_orthogonality_error,
+                     dso_fixed::kMaxBasisOrthogonalityError);
+  }
+
   TEST(CasrInterventionPlan, RequiresExplicitEstimatorArming)
   {
     CasrInterventionConfig config;

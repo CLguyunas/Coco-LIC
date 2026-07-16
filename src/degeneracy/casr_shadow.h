@@ -11,6 +11,7 @@
 #pragma once
 
 #include <degeneracy/casr_route.h>
+#include <degeneracy/dso_fixed_config.h>
 
 #include <Eigen/Core>
 
@@ -49,11 +50,13 @@ namespace cocolic
   {
     bool enabled = false;
     double environment_relative_threshold = 6e-3;
-    double support_basis_relative_singular_threshold = 1e-6;
-    double lift_regularization = 1e-6;
+    double support_basis_relative_singular_threshold =
+        dso_fixed::kSupportBasisRelativeSingularThreshold;
+    double lift_regularization = dso_fixed::kLiftRegularization;
     double principal_cosine_threshold = 7e-1;
-    int route_consecutive_scans = 3;
-    int projector_consecutive_scans = 3;
+    int route_consecutive_scans = dso_fixed::kRouteConsecutiveScans;
+    int projector_consecutive_scans =
+        dso_fixed::kProjectorConsecutiveScans;
     double projector_similarity_threshold = 8e-1;
 
     // Stage-4 scheduler remains read-only. It converts a binary
@@ -65,14 +68,21 @@ namespace cocolic
     double scheduler_environment_zero_confidence_threshold = 6e-3;
     double scheduler_support_full_confidence_threshold = 2e-2;
     double scheduler_support_zero_confidence_threshold = 5e-2;
-    double scheduler_projector_full_confidence = 9.5e-1;
-    double scheduler_principal_full_confidence = 9e-1;
-    int scheduler_persistence_full_scans = 5;
-    double scheduler_enter_confidence = 2.5e-1;
-    double scheduler_exit_confidence = 1e-1;
-    double scheduler_rise_time_s = 5e-1;
-    double scheduler_fall_time_s = 2e-1;
-    double scheduler_max_dt_s = 5e-1;
+    double scheduler_projector_full_confidence =
+        dso_fixed::kSchedulerProjectorFullConfidence;
+    double scheduler_principal_full_confidence =
+        dso_fixed::kSchedulerPrincipalFullConfidence;
+    int scheduler_persistence_full_scans =
+        dso_fixed::kSchedulerPersistenceFullScans;
+    double scheduler_enter_confidence =
+        dso_fixed::kSchedulerEnterConfidence;
+    double scheduler_exit_confidence =
+        dso_fixed::kSchedulerExitConfidence;
+    double scheduler_rise_time_s =
+        dso_fixed::kSchedulerRiseTimeSeconds;
+    double scheduler_fall_time_s =
+        dso_fixed::kSchedulerFallTimeSeconds;
+    double scheduler_max_dt_s = dso_fixed::kSchedulerMaxDtSeconds;
   };
 
   struct CasrShadowInput

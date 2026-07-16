@@ -201,33 +201,41 @@ namespace cocolic
     Trajectory::Ptr trajectory_;
 
     bool enabled_ = false;
-    bool output_csv_ = true;
-    bool use_correspondence_scale_ = true;
-    int min_correspondences_ = 30;
-    int analyze_every_n_scans_ = 1;
-    int print_every_n_scans_ = 20;
-    double relative_eigenvalue_threshold_ = 1e-3;
+    bool output_csv_ = dso_fixed::kOutputCsv;
+    bool use_correspondence_scale_ = dso_fixed::kUseCorrespondenceScale;
+    int min_correspondences_ = dso_fixed::kMinCorrespondences;
+    int analyze_every_n_scans_ = dso_fixed::kAnalyzeEveryNScans;
+    int print_every_n_scans_ = dso_fixed::kPrintEveryNScans;
+    double relative_eigenvalue_threshold_ =
+        dso_fixed::kLegacyRelativeEigenvalueThreshold;
     double enter_relative_eigenvalue_threshold_ = 3e-3;
     double exit_relative_eigenvalue_threshold_ = 6e-3;
-    int enter_consecutive_scans_ = 10;
-    int exit_consecutive_scans_ = 10;
-    double min_characteristic_range_ = 1.0;
-    double max_characteristic_range_ = 100.0;
+    int enter_consecutive_scans_ =
+        dso_fixed::kDetectorEnterConsecutiveScans;
+    int exit_consecutive_scans_ =
+        dso_fixed::kDetectorExitConsecutiveScans;
+    double min_characteristic_range_ =
+        dso_fixed::kMinCharacteristicRange;
+    double max_characteristic_range_ =
+        dso_fixed::kMaxCharacteristicRange;
 
-    bool support_enabled_ = true;
-    int support_reference_samples_per_interval_ = 32;
-    int support_max_control_points_ = 32;
+    bool support_enabled_ = dso_fixed::kSupportEnabled;
+    int support_reference_samples_per_interval_ =
+        dso_fixed::kSupportReferenceSamplesPerInterval;
+    int support_max_control_points_ = dso_fixed::kSupportMaxControlPoints;
     double support_enter_quality_threshold_ = 2e-2;
     double support_exit_quality_threshold_ = 5e-2;
-    int support_enter_consecutive_scans_ = 10;
-    int support_exit_consecutive_scans_ = 10;
+    int support_enter_consecutive_scans_ =
+        dso_fixed::kSupportEnterConsecutiveScans;
+    int support_exit_consecutive_scans_ =
+        dso_fixed::kSupportExitConsecutiveScans;
 
     bool support_injection_enabled_ = false;
-    bool support_injection_output_csv_ = true;
+    bool support_injection_output_csv_ = dso_fixed::kInjectionOutputCsv;
     SupportDegradationInjector support_injector_;
 
     bool casr_shadow_enabled_ = false;
-    bool casr_shadow_output_csv_ = true;
+    bool casr_shadow_output_csv_ = dso_fixed::kCasrShadowOutputCsv;
     CasrShadowEvaluator casr_shadow_evaluator_;
     CasrTemporalState real_casr_temporal_state_;
     CasrTemporalState injected_casr_temporal_state_;

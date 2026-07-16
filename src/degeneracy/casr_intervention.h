@@ -10,6 +10,7 @@
 #pragma once
 
 #include <degeneracy/casr_shadow.h>
+#include <degeneracy/dso_fixed_config.h>
 
 #include <yaml-cpp/yaml.h>
 
@@ -50,32 +51,39 @@ namespace cocolic
     // changed only when apply_to_estimator is also true.
     bool enabled = false;
     bool apply_to_estimator = false;
-    bool output_csv = true;
+    bool output_csv = dso_fixed::kInterventionOutputCsv;
 
-    // Legacy fixed-weight mode. It is used only when curvature matching is
-    // explicitly disabled.
-    double base_information_weight = 1.0;
-    double max_effective_information_weight = 100.0;
+    // Internal legacy fallback retained for unit-level compatibility. The
+    // production YAML path always enables curvature matching.
+    double base_information_weight =
+        dso_fixed::kLegacyBaseInformationWeight;
+    double max_effective_information_weight =
+        dso_fixed::kLegacyMaxEffectiveInformationWeight;
 
     // Match every recovery direction to the curvature of the actual final
     // LIC problem before the intervention factor is added.  Curvatures are
     // expressed in the same metric [r*dtheta, dp] used by the CASR basis.
-    bool curvature_matching_enabled = true;
-    double curvature_target_relative_to_max = 6e-3;
-    double curvature_max_added_relative_to_max = 2e-2;
-    double curvature_gain = 1.0;
-    double curvature_min_reference = 1e-9;
+    bool curvature_matching_enabled = dso_fixed::kCurvatureMatchingEnabled;
+    double curvature_target_relative_to_max =
+        dso_fixed::kCurvatureTargetRelativeToMax;
+    double curvature_max_added_relative_to_max =
+        dso_fixed::kCurvatureMaxAddedRelativeToMax;
+    // The only estimator-strength hyperparameter exposed in YAML.
+    double curvature_gain = dso_fixed::kDefaultCurvatureGain;
+    double curvature_min_reference = dso_fixed::kCurvatureMinReference;
 
     // When armed, solve the unmodified and CASR problems from the exact same
     // parameter snapshot. The baseline solution is retained as a safe
     // fallback if the CASR solve is unusable.
-    bool counterfactual_validation = true;
-    double counterfactual_ratio_denominator_floor = 1e-6;
-    double min_activation_strength = 5e-2;
-    double max_activation_strength = 1.0;
-    int max_control_points = 32;
-    int max_recovery_rank = 32;
-    double max_basis_orthogonality_error = 1e-6;
+    bool counterfactual_validation = dso_fixed::kCounterfactualValidation;
+    double counterfactual_ratio_denominator_floor =
+        dso_fixed::kCounterfactualRatioDenominatorFloor;
+    double min_activation_strength = dso_fixed::kMinActivationStrength;
+    double max_activation_strength = dso_fixed::kMaxActivationStrength;
+    int max_control_points = dso_fixed::kInterventionMaxControlPoints;
+    int max_recovery_rank = dso_fixed::kMaxRecoveryRank;
+    double max_basis_orthogonality_error =
+        dso_fixed::kMaxBasisOrthogonalityError;
   };
 
   struct CasrCurvatureEstimate

@@ -40,139 +40,31 @@ accelerometer_random_walk: 1.96e-06
 ### DSO-DetectOnly ###
 # LiDAR 6DoF observability diagnostics. The detector, support injector, CASR
 # router, and scheduler are read-only. The separate casr_intervention block
-# below is the only opt-in estimator write path.
+# below is the only opt-in estimator write path. Implementation constants,
+# logging controls, safety limits, and derived scheduler anchors are fixed in
+# src/degeneracy/dso_fixed_config.h and cannot be overridden by YAML.
 dso_detect_only:
     enabled: true
-    output_csv: true
-    use_correspondence_scale: true
-    min_correspondences: 30
-    analyze_every_n_scans: 1
-    print_every_n_scans: 20
-    # Legacy hard count, retained for raw diagnostics and compatibility.
-    relative_eigenvalue_threshold: 1.0e-3
-    # Experimental temporal decision layer. These values are configurable and
-    # must be validated on additional scenes before claiming generality.
+    # Method hyperparameters: keep fixed across compared sequences. The exit
+    # value is also reused by the CASR environment router and scheduler.
     enter_relative_eigenvalue_threshold: 3.0e-3
     exit_relative_eigenvalue_threshold: 6.0e-3
-    enter_consecutive_scans: 10
-    exit_consecutive_scans: 10
-    min_characteristic_range: 1.0
-    max_characteristic_range: 100.0
-    # Stage 2: exact four-control-point NURBS support diagnostics. The quality
-    # is a generalized eigenvalue relative to ideal uniform sampling of the
-    # same active non-uniform knot intervals (1.0 is ideal; lower is weaker).
-    # This remains read-only and is not fed back into Ceres.
-    support_enabled: true
-    support_reference_samples_per_interval: 32
-    support_max_control_points: 32
     support_enter_quality_threshold: 2.0e-2
     support_exit_quality_threshold: 5.0e-2
-    support_enter_consecutive_scans: 10
-    support_exit_consecutive_scans: 10
-    # Stage 2 validation harness. It transforms only a timestamp/weight copy
-    # read by the support diagnostic and writes a separate injection CSV.
-    # Keep diagnostics_only true; a false value is refused by the code.
-    support_injection:
-        enabled: false
-        diagnostics_only: true
-        output_csv: true
-        # timestamp_compression | phase_dropout | boundary_dropout |
-        # temporal_thinning
-        mode: timestamp_compression
-        severity: 0.5
-        # Normalized within-scan phase, independent of bag duration/sensor Hz.
-        # Compression automatically preserves the earliest/latest timestamps
-        # as boundary anchors. Use 0.0/1.0 for compression; 0.2/0.8 is a
-        # useful dropout window.
-        phase_start: 0.0
-        phase_end: 1.0
-        random_seed: 42
-    # Stage 3: cause-adaptive subspace recovery in shadow mode. CASR-v2 keeps
-    # support modes in the active 6K knot space and lifts map-frame environment
-    # directions into that same space over the full scan. It does not add a
-    # prior or change any estimator residual. A false shadow_only value is
-    # refused by the code.
+
+    # Knot-space CASR method hyperparameters. Shadow recovery and its temporal
+    # scheduler are automatically enabled whenever DSO-DetectOnly is enabled.
     casr_shadow:
-        enabled: true
-        shadow_only: true
-        output_csv: true
-        # Environment directions inside the hysteresis exit band remain
-        # eligible while the persistent environment state is active.
-        environment_relative_threshold: 6.0e-3
-        # Numerical rank threshold only; physical support-mode selection still
-        # comes from the generalized support-quality threshold above.
-        support_basis_relative_singular_threshold: 1.0e-6
-        # Tikhonov strength for the scan-wide pose-to-knot least-squares lift,
-        # relative to the largest reference information eigenvalue.
-        lift_regularization: 1.0e-6
-        # cos(theta)>=0.7 defines a reliable 6K common principal direction.
         principal_cosine_threshold: 7.0e-1
-        # Shadow-only temporal gate. Raw routes remain logged; stable routes
-        # and recovery_ready require route continuity plus dimension-debiased
-        # projector continuity on common global control points. The debiasing
-        # removes overlap that high-rank subspaces must share geometrically.
-        route_consecutive_scans: 3
-        projector_consecutive_scans: 3
         projector_similarity_threshold: 8.0e-1
-        # Stage 4: cause-aware pre-intervention scheduler. It converts a
-        # recovery_ready candidate into a continuous shadow strength. The
-        # scheduler itself remains read-only; only the separately armed and
-        # independently gated Stage-5 intervention may consume the real path.
-        activation_scheduler:
-            enabled: true
-            # Full/zero confidence anchors reuse the detector hysteresis
-            # bands instead of introducing unrelated physical thresholds.
-            environment_full_confidence_threshold: 3.0e-3
-            environment_zero_confidence_threshold: 6.0e-3
-            support_full_confidence_threshold: 2.0e-2
-            support_zero_confidence_threshold: 5.0e-2
-            # Similarity/cosine values at or above these anchors receive full
-            # confidence. Values at the CASR decision thresholds receive zero.
-            projector_full_confidence: 9.5e-1
-            principal_full_confidence: 9.0e-1
-            # A ready candidate reaches full persistence confidence only after
-            # five consistent scans, although binary recovery_ready starts at
-            # the existing three-scan gate.
-            persistence_full_scans: 5
-            # Confidence hysteresis prevents an activation latch from
-            # chattering near one threshold.
-            enter_confidence: 2.5e-1
-            exit_confidence: 1.0e-1
-            # Time-based slew limits are independent of scan frequency.
-            rise_time_s: 5.0e-1
-            fall_time_s: 2.0e-1
-            max_dt_s: 5.0e-1
-    # Stage 5: intervention audit and optional estimator factor. enabled=true
-    # with apply_to_estimator=false is a trajectory-neutral dry run that logs
-    # which frames would receive the factor. Both switches must be true before
-    # Ceres is changed. The factor is added only to the final LIC refinement
-    # and is deliberately excluded from the marginalization prior.
+
+    # Experiment mode switches plus the only estimator-strength parameter.
+    # Keep apply_to_estimator=false for dry-run audit; set it true only for an
+    # armed run. The validated starting gain is 0.01.
     casr_intervention:
         enabled: true
         apply_to_estimator: false
-        output_csv: true
-        # Default v2 mode evaluates the real final-LIC Jacobian before adding
-        # CASR. Each recovery eigen-direction receives only the information
-        # missing from target_relative * lambda_max(H_LIC), scaled by the
-        # scheduler activation. This avoids dataset-specific manual weights.
-        curvature_matching_enabled: true
-        curvature_target_relative_to_max: 6.0e-3
-        curvature_max_added_relative_to_max: 2.0e-2
-        curvature_gain: 1.0
-        curvature_min_reference: 1.0e-9
-        # Armed frames solve baseline and CASR from the exact same parameter
-        # snapshot. The baseline solution is also the CASR-failure fallback.
-        counterfactual_validation: true
-        counterfactual_ratio_denominator_floor: 1.0e-6
-        # Legacy fixed-weight fallback, used only when
-        # curvature_matching_enabled is false.
-        base_information_weight: 1.0
-        max_effective_information_weight: 1.0e+2
-        min_activation_strength: 5.0e-2
-        max_activation_strength: 1.0
-        max_control_points: 32
-        max_recovery_rank: 32
-        max_basis_orthogonality_error: 1.0e-6
+        curvature_gain: 1.0e-2
 
 
 ### EvalutaionParams ###
