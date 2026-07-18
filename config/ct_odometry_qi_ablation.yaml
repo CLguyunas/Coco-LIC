@@ -1,0 +1,21 @@
+# QI-LIC ablation template for R3LIVE-style configurations.
+# Copy the QI section into the dataset configuration being evaluated.
+
+# Baseline: set both qi_quality_enable and qi_selection_enable to false.
+qi_quality_enable: false
+qi_lidar_quality_enable: true
+qi_visual_quality_enable: true
+qi_selection_enable: false
+
+qi_lidar_q_min: 1.0
+qi_lidar_q_max: 1.2
+qi_visual_q_min: 0.7
+qi_visual_q_max: 1.0
+qi_visual_point_quality_weight: 0.25
+
+qi_max_lidar_obs: 800
+qi_max_visual_obs: 200
+qi_selection_info_ratio: 0.95
+qi_selection_min_gain: 1.0e-6
+qi_info_prior_eps: 1.0e-6
+qi_log_enable: true
