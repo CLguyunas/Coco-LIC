@@ -921,8 +921,7 @@ namespace cocolic
             const Eigen::JacobiSVD<Eigen::MatrixXd> continuity_svd(
                 continuity_basis, Eigen::ComputeThinU |
                                       Eigen::ComputeThinV);
-            if (continuity_svd.info() != Eigen::Success ||
-                continuity_svd.singularValues().size() !=
+            if (continuity_svd.singularValues().size() !=
                     casr_plan.recovery_rank ||
                 !continuity_svd.singularValues().allFinite() ||
                 continuity_svd.singularValues().minCoeff() <=
