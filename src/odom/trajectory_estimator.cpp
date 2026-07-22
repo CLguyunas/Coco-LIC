@@ -179,9 +179,11 @@ namespace cocolic
     }
   }
 
-  ceres::ResidualBlockId TrajectoryEstimator::AddCasrSubspaceIntervention(
+  ceres::ResidualBlockId TrajectoryEstimator::AddCasrCauseDrivenIntervention(
+      CasrRecoveryMechanism recovery_mechanism,
       int control_point_start_index,
       const Eigen::MatrixXd &recovery_basis,
+      const Eigen::MatrixXd &affine_nullspace_projector,
       const Eigen::aligned_vector<SO3d> &reference_rotations,
       const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
       double characteristic_range,
@@ -199,9 +201,33 @@ namespace cocolic
       return nullptr;
     }
 
-    auto *cost_function = new analytic_derivative::CasrSubspaceFactor(
-        recovery_basis, reference_rotations, reference_positions,
-        characteristic_range, sqrt_information_weights);
+    analytic_derivative::CasrSubspaceFactor *cost_function = nullptr;
+    switch (recovery_mechanism)
+    {
+    case CasrRecoveryMechanism::PropagationReference:
+      cost_function =
+          new analytic_derivative::CasrPropagationReferenceFactor(
+              recovery_basis, reference_rotations, reference_positions,
+              characteristic_range, sqrt_information_weights);
+      break;
+    case CasrRecoveryMechanism::SplineIncrementContinuity:
+      cost_function =
+          new analytic_derivative::CasrSplineContinuityFactor(
+              recovery_basis, affine_nullspace_projector,
+              reference_rotations, reference_positions,
+              characteristic_range, sqrt_information_weights);
+      break;
+    case CasrRecoveryMechanism::CoupledSourceConsensus:
+      cost_function =
+          new analytic_derivative::CasrCoupledConsensusFactor(
+              recovery_basis, affine_nullspace_projector,
+              reference_rotations, reference_positions,
+              characteristic_range, sqrt_information_weights);
+      break;
+    case CasrRecoveryMechanism::None:
+    default:
+      return nullptr;
+    }
     if (!cost_function->IsValid())
     {
       delete cost_function;

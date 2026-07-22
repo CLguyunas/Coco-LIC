@@ -20,7 +20,27 @@ namespace cocolic
 {
 
   inline constexpr char kCasrInterventionMethodVersion[] =
-      "knot_space_curvature_matched_counterfactual_v2";
+      "cause_differential_recovery_v3";
+
+  enum class CasrRecoveryMechanism : int
+  {
+    None = 0,
+    PropagationReference = 1,
+    SplineIncrementContinuity = 2,
+    CoupledSourceConsensus = 3
+  };
+
+  const char *CasrRecoveryMechanismName(CasrRecoveryMechanism mechanism);
+
+  enum class CasrRecoveryReference : int
+  {
+    None = 0,
+    ImuPriorPropagation = 1,
+    NonuniformSplineContinuity = 2,
+    PropagationAndSplineConsensus = 3
+  };
+
+  const char *CasrRecoveryReferenceName(CasrRecoveryReference reference);
 
   enum class CasrInterventionState : int
   {
@@ -40,7 +60,10 @@ namespace cocolic
     DiagnosticsCopyBlocked = 13,
     SolverFailureRecovered = 14,
     CurvatureInvalid = 15,
-    CurvatureSufficient = 16
+    CurvatureSufficient = 16,
+    InvalidTemporalSupport = 17,
+    SourceConsensusInsufficient = 18,
+    SourceConsensusConflict = 19
   };
 
   const char *CasrInterventionStateName(CasrInterventionState state);
@@ -116,6 +139,11 @@ namespace cocolic
     Eigen::VectorXd sqrt_information_weights;
     Eigen::MatrixXd recovery_basis_rotation;
 
+    CasrRecoveryMechanism recovery_mechanism =
+        CasrRecoveryMechanism::None;
+    CasrRecoveryReference recovery_reference =
+        CasrRecoveryReference::None;
+
     bool curvature_matching_enabled = false;
     bool curvature_valid = false;
     int curvature_tangent_dimension = 0;
@@ -143,6 +171,20 @@ namespace cocolic
       const CasrCurvatureEstimate &estimate,
       CasrInterventionPlan &plan);
 
+  struct CasrSourceConsensus
+  {
+    bool evaluated = false;
+    bool sufficient = false;
+    bool consistent = false;
+    double environment_norm = 0.0;
+    double support_norm = 0.0;
+    double cosine = 0.0;
+  };
+
+  CasrSourceConsensus EvaluateCasrSourceConsensus(
+      const Eigen::VectorXd &environment_coordinates,
+      const Eigen::VectorXd &support_coordinates);
+
   struct CasrInterventionReport
   {
     CasrInterventionState state = CasrInterventionState::Disabled;
@@ -154,6 +196,10 @@ namespace cocolic
     int64_t scan_timestamp_ns = 0;
     CasrRoute route = CasrRoute::Invalid;
     CasrDataSource data_source = CasrDataSource::RealMeasurements;
+    CasrRecoveryMechanism recovery_mechanism =
+        CasrRecoveryMechanism::None;
+    CasrRecoveryReference recovery_reference =
+        CasrRecoveryReference::None;
     int control_point_start_index = -1;
     int control_point_num = 0;
     int recovery_rank = 0;
@@ -176,6 +222,21 @@ namespace cocolic
     double added_information_min = 0.0;
     double added_information_median = 0.0;
     double added_information_max = 0.0;
+
+    bool continuity_operator_valid = false;
+    int continuity_operator_rank = 0;
+    double continuity_symmetry_error = 0.0;
+    double continuity_idempotence_error = 0.0;
+    double pre_environment_residual_norm = 0.0;
+    double pre_support_residual_norm = 0.0;
+    double post_environment_residual_norm = 0.0;
+    double post_support_residual_norm = 0.0;
+    double counterfactual_environment_residual_norm = 0.0;
+    double counterfactual_support_residual_norm = 0.0;
+    bool source_consensus_evaluated = false;
+    bool source_consensus_sufficient = false;
+    bool source_consensus_consistent = false;
+    double source_consensus_cosine = 0.0;
 
     double pre_total_increment_norm = 0.0;
     double pre_projected_increment_norm = 0.0;

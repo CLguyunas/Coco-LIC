@@ -25,6 +25,8 @@ REQUIRED_COLUMNS = {
     "applied",
     "data_source_code",
     "route",
+    "recovery_mechanism",
+    "recovery_reference",
     "recovery_rank",
     "requested_activation_strength",
     "used_activation_strength",
@@ -48,12 +50,26 @@ REQUIRED_COLUMNS = {
     "added_information_min",
     "added_information_median",
     "added_information_max",
+    "continuity_operator_valid",
+    "continuity_operator_rank",
+    "continuity_symmetry_error",
+    "continuity_idempotence_error",
+    "pre_environment_residual_norm",
+    "pre_support_residual_norm",
+    "post_environment_residual_norm",
+    "post_support_residual_norm",
     "counterfactual_enabled",
     "counterfactual_solver_usable",
     "counterfactual_total_increment_norm",
     "counterfactual_projected_increment_norm",
     "counterfactual_orthogonal_increment_norm",
     "counterfactual_factor_residual_norm",
+    "counterfactual_environment_residual_norm",
+    "counterfactual_support_residual_norm",
+    "source_consensus_evaluated",
+    "source_consensus_sufficient",
+    "source_consensus_consistent",
+    "source_consensus_cosine",
     "projected_casr_over_counterfactual",
     "orthogonal_casr_over_counterfactual",
 }
@@ -73,6 +89,10 @@ INTEGER_COLUMNS = {
     "curvature_valid",
     "counterfactual_enabled",
     "counterfactual_solver_usable",
+    "continuity_operator_valid",
+    "source_consensus_evaluated",
+    "source_consensus_sufficient",
+    "source_consensus_consistent",
 }
 
 FLOAT_COLUMNS = {
@@ -92,10 +112,19 @@ FLOAT_COLUMNS = {
     "added_information_min",
     "added_information_median",
     "added_information_max",
+    "continuity_symmetry_error",
+    "continuity_idempotence_error",
+    "pre_environment_residual_norm",
+    "pre_support_residual_norm",
+    "post_environment_residual_norm",
+    "post_support_residual_norm",
     "counterfactual_total_increment_norm",
     "counterfactual_projected_increment_norm",
     "counterfactual_orthogonal_increment_norm",
     "counterfactual_factor_residual_norm",
+    "counterfactual_environment_residual_norm",
+    "counterfactual_support_residual_norm",
+    "source_consensus_cosine",
     "projected_casr_over_counterfactual",
     "orthogonal_casr_over_counterfactual",
 }
@@ -146,6 +175,9 @@ def read_csv(path: Path) -> List[Dict[str, object]]:
                 row["curvature_tangent_dimension"] = int(
                     str(raw["curvature_tangent_dimension"])
                 )
+                row["continuity_operator_rank"] = int(
+                    str(raw["continuity_operator_rank"])
+                )
                 for name in FLOAT_COLUMNS:
                     row[name] = float(str(raw[name]))
             except (TypeError, ValueError) as error:
@@ -171,6 +203,8 @@ def audit_rows(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
     sources = Counter(int(row["data_source_code"]) for row in rows)
     apply_flags = Counter(int(row["apply_to_estimator"]) for row in rows)
     states = Counter(str(row["state"]) for row in rows)
+    mechanisms = Counter(str(row["recovery_mechanism"]) for row in rows)
+    references = Counter(str(row["recovery_reference"]) for row in rows)
     if set(sources) - {0}:
         errors.append("non-real diagnostics-copy source reached intervention CSV")
     if len(methods) != 1:
@@ -188,6 +222,12 @@ def audit_rows(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
         apply_to_estimator = int(row["apply_to_estimator"])
         curvature_matching = int(row["curvature_matching_enabled"])
         curvature_valid = int(row["curvature_valid"])
+        mechanism = str(row["recovery_mechanism"])
+        route = str(row["route"])
+        continuity_valid = int(row["continuity_operator_valid"])
+        consensus_evaluated = int(row["source_consensus_evaluated"])
+        consensus_sufficient = int(row["source_consensus_sufficient"])
+        consensus_consistent = int(row["source_consensus_consistent"])
         for name in FLOAT_COLUMNS - {"scan_timestamp_s"}:
             if not math.isfinite(float(row[name])):
                 errors.append(f"line {index}: {name} is non-finite")
@@ -210,6 +250,34 @@ def audit_rows(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
         if state in {"curvature_invalid", "curvature_sufficient"} and (
             factor_added or applied
         ):
+            errors.append(
+                f"line {index}: {state} unexpectedly changed the estimator"
+            )
+        expected_mechanism = {
+            "environment_candidate": "propagation_reference",
+            "support_candidate": "spline_increment_continuity",
+            "coupled_common_candidate": "coupled_source_consensus",
+        }.get(route)
+        if eligible and expected_mechanism and mechanism != expected_mechanism:
+            errors.append(
+                f"line {index}: route {route} uses mechanism {mechanism}"
+            )
+        if factor_added and mechanism in {
+            "spline_increment_continuity", "coupled_source_consensus"
+        } and not continuity_valid:
+            errors.append(
+                f"line {index}: temporal mechanism lacks a valid continuity operator"
+            )
+        if factor_added and mechanism == "coupled_source_consensus" and not (
+            consensus_evaluated and consensus_sufficient and consensus_consistent
+        ):
+            errors.append(
+                f"line {index}: coupled factor bypassed source-consensus gate"
+            )
+        if state in {
+            "invalid_temporal_support", "source_consensus_insufficient",
+            "source_consensus_conflict",
+        } and (factor_added or applied):
             errors.append(
                 f"line {index}: {state} unexpectedly changed the estimator"
             )
@@ -239,6 +307,28 @@ def audit_rows(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
         measurement_rows,
         "post_orthogonal_increment_norm",
         "pre_orthogonal_increment_norm",
+    )
+    environment_source_rows = [
+        row for row in measurement_rows
+        if str(row["recovery_mechanism"]) in {
+            "propagation_reference", "coupled_source_consensus"
+        }
+    ]
+    support_source_rows = [
+        row for row in measurement_rows
+        if str(row["recovery_mechanism"]) in {
+            "spline_increment_continuity", "coupled_source_consensus"
+        }
+    ]
+    environment_source_ratios = _ratios(
+        environment_source_rows,
+        "post_environment_residual_norm",
+        "pre_environment_residual_norm",
+    )
+    support_source_ratios = _ratios(
+        support_source_rows,
+        "post_support_residual_norm",
+        "pre_support_residual_norm",
     )
     if measurement_rows and not projected_ratios:
         warnings.append("measured rows have no nonzero pre projected increment")
@@ -271,12 +361,28 @@ def audit_rows(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
         "apply_to_estimator": dict(apply_flags),
         "data_sources": dict(sources),
         "states": dict(states),
+        "recovery_mechanisms": dict(mechanisms),
+        "recovery_references": dict(references),
         "eligible_rows": sum(int(row["eligible"]) for row in rows),
         "factor_added_rows": sum(int(row["factor_added"]) for row in rows),
         "committed_rows": len(applied_rows),
         "fallback_attempted_rows": sum(
             int(row["fallback_attempted"]) for row in rows
         ),
+        "continuity_valid_rows": sum(
+            int(row["continuity_operator_valid"]) for row in rows
+        ),
+        "coupled_consensus": {
+            "evaluated": sum(
+                int(row["source_consensus_evaluated"]) for row in rows
+            ),
+            "sufficient": sum(
+                int(row["source_consensus_sufficient"]) for row in rows
+            ),
+            "consistent": sum(
+                int(row["source_consensus_consistent"]) for row in rows
+            ),
+        },
         "projected_post_over_pre": {
             "count": len(projected_ratios),
             "median": _median(projected_ratios),
@@ -286,6 +392,16 @@ def audit_rows(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
             "count": len(orthogonal_ratios),
             "median": _median(orthogonal_ratios),
             "p90": _quantile(orthogonal_ratios, 0.9),
+        },
+        "environment_source_post_over_pre": {
+            "count": len(environment_source_ratios),
+            "median": _median(environment_source_ratios),
+            "p90": _quantile(environment_source_ratios, 0.9),
+        },
+        "support_source_post_over_pre": {
+            "count": len(support_source_ratios),
+            "median": _median(support_source_ratios),
+            "p90": _quantile(support_source_ratios, 0.9),
         },
         "projected_casr_over_same_frame_baseline": {
             "count": len(projected_counterfactual_ratios),
@@ -331,12 +447,29 @@ def aligned_comparison(
         == int(second_by_time[t]["recovery_rank"])
         for t in common
     )
+    method_matches = sum(
+        str(first_by_time[t]["method_version"])
+        == str(second_by_time[t]["method_version"])
+        for t in common
+    )
+    mechanism_matches = sum(
+        str(first_by_time[t]["recovery_mechanism"])
+        == str(second_by_time[t]["recovery_mechanism"])
+        for t in common
+    )
     return {
         "aligned_rows": len(common),
         "first_only_rows": len(first_by_time) - len(common),
         "second_only_rows": len(second_by_time) - len(common),
         "route_match_fraction": route_matches / len(common) if common else None,
         "rank_match_fraction": rank_matches / len(common) if common else None,
+        "method_version_match_fraction": (
+            method_matches / len(common) if common else None
+        ),
+        "mechanism_match_fraction": (
+            mechanism_matches / len(common) if common else None
+        ),
+        "comparable": bool(common) and method_matches == len(common),
         "activation_absolute_difference_median": _median(
             activation_differences
         ),
@@ -402,6 +535,8 @@ def main() -> int:
         bool(summary["passed"])
         for summary in output["runs"].values()  # type: ignore[union-attr]
     )
+    if "comparison" in output:
+        passed = passed and bool(output["comparison"]["comparable"])
     output["passed"] = passed
     if args.json:
         print(json.dumps(output, indent=2, sort_keys=True))
@@ -410,6 +545,9 @@ def main() -> int:
             summary = output["runs"][label]  # type: ignore[index]
             print(f"[{label}] rows={summary['rows']} passed={summary['passed']}")
             print(f"  states={summary['states']}")
+            print(f"  mechanisms={summary['recovery_mechanisms']}")
+            print(f"  references={summary['recovery_references']}")
+            print(f"  coupled-consensus={summary['coupled_consensus']}")
             print(
                 "  eligible/factor/committed="
                 f"{summary['eligible_rows']}/{summary['factor_added_rows']}/"
@@ -422,6 +560,14 @@ def main() -> int:
             print(
                 "  orthogonal post/pre="
                 f"{summary['orthogonal_post_over_pre']}"
+            )
+            print(
+                "  environment-source post/pre="
+                f"{summary['environment_source_post_over_pre']}"
+            )
+            print(
+                "  support-source post/pre="
+                f"{summary['support_source_post_over_pre']}"
             )
             print(
                 "  projected CASR/same-frame-baseline="

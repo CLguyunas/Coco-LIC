@@ -117,6 +117,78 @@ max_basis_orthogonality_error: 0.5
     EXPECT_EQ(armed.state, CasrInterventionState::Applied);
   }
 
+  TEST(CasrInterventionPlan, SelectsCauseSpecificRecoveryMechanism)
+  {
+    CasrInterventionConfig config;
+    config.enabled = true;
+    config.apply_to_estimator = false;
+    config.curvature_matching_enabled = false;
+
+    CasrShadowResult result = ReadyEnvironmentResult();
+    CasrInterventionPlan plan =
+        BuildCasrInterventionPlan(config, result, 2.0, 10);
+    EXPECT_EQ(plan.recovery_mechanism,
+              CasrRecoveryMechanism::PropagationReference);
+    EXPECT_EQ(plan.recovery_reference,
+              CasrRecoveryReference::ImuPriorPropagation);
+
+    result.route = CasrRoute::SupportCandidate;
+    result.stable_route = result.route;
+    plan = BuildCasrInterventionPlan(config, result, 2.0, 10);
+    EXPECT_EQ(plan.recovery_mechanism,
+              CasrRecoveryMechanism::SplineIncrementContinuity);
+    EXPECT_EQ(plan.recovery_reference,
+              CasrRecoveryReference::NonuniformSplineContinuity);
+
+    result.route = CasrRoute::CoupledCommonCandidate;
+    result.stable_route = result.route;
+    plan = BuildCasrInterventionPlan(config, result, 2.0, 10);
+    EXPECT_EQ(plan.recovery_mechanism,
+              CasrRecoveryMechanism::CoupledSourceConsensus);
+    EXPECT_EQ(plan.recovery_reference,
+              CasrRecoveryReference::PropagationAndSplineConsensus);
+  }
+
+  TEST(CasrSourceConsensus, AcceptsAlignedAndRejectsConflictingEvidence)
+  {
+    const Eigen::Vector2d environment(1.0, 2.0);
+    CasrSourceConsensus consensus =
+        EvaluateCasrSourceConsensus(environment,
+                                    3.0 * environment);
+    EXPECT_TRUE(consensus.evaluated);
+    EXPECT_TRUE(consensus.sufficient);
+    EXPECT_TRUE(consensus.consistent);
+    EXPECT_NEAR(consensus.cosine, 1.0, 1e-12);
+
+    consensus = EvaluateCasrSourceConsensus(environment, -environment);
+    EXPECT_TRUE(consensus.sufficient);
+    EXPECT_FALSE(consensus.consistent);
+    EXPECT_NEAR(consensus.cosine, -1.0, 1e-12);
+
+    consensus = EvaluateCasrSourceConsensus(
+        environment, Eigen::Vector2d::Zero());
+    EXPECT_TRUE(consensus.evaluated);
+    EXPECT_FALSE(consensus.sufficient);
+    EXPECT_FALSE(consensus.consistent);
+  }
+
+  TEST(CasrInterventionPlan, CoupledRouteCannotBypassCounterfactualConsensus)
+  {
+    CasrInterventionConfig config;
+    config.enabled = true;
+    config.apply_to_estimator = true;
+    config.counterfactual_validation = false;
+    CasrShadowResult result = ReadyEnvironmentResult();
+    result.route = CasrRoute::CoupledCommonCandidate;
+    result.stable_route = result.route;
+
+    const CasrInterventionPlan plan =
+        BuildCasrInterventionPlan(config, result, 2.0, 10);
+    EXPECT_FALSE(plan.eligible);
+    EXPECT_EQ(plan.state,
+              CasrInterventionState::SourceConsensusInsufficient);
+  }
+
   TEST(CasrInterventionPlan, RejectsUnsafeAndStaleRoutes)
   {
     CasrInterventionConfig config;
@@ -350,6 +422,155 @@ max_basis_orthogonality_error: 0.5
     ASSERT_TRUE(factor.Evaluate(parameter_blocks.data(), &residual,
                                 nullptr));
     EXPECT_NEAR(residual, 0.75, 1e-12);
+  }
+
+  TEST(CasrSplineContinuity, NonuniformProjectorRemovesAffineIncrements)
+  {
+    using analytic_derivative::BuildCasrAffineNullspaceProjector;
+    const std::vector<double> times{0.0, 0.08, 0.31, 0.77};
+    const Eigen::MatrixXd projector =
+        BuildCasrAffineNullspaceProjector(times);
+    ASSERT_EQ(projector.rows(), 24);
+    ASSERT_EQ(projector.cols(), 24);
+    EXPECT_LT((projector - projector.transpose()).norm(), 1e-12);
+    EXPECT_LT((projector * projector - projector).norm(), 1e-12);
+
+    Eigen::VectorXd affine = Eigen::VectorXd::Zero(24);
+    for (int i = 0; i < 4; ++i)
+    {
+      affine[6 * i + 3] = 0.4 + 1.7 * times[static_cast<size_t>(i)];
+    }
+    EXPECT_LT((projector * affine).norm(), 1e-12);
+
+    Eigen::VectorXd non_affine = affine;
+    non_affine[6 * 2 + 3] += 0.5;
+    EXPECT_GT((projector * non_affine).norm(), 1e-2);
+  }
+
+  TEST(CasrSplineContinuity, TransportsRotationIncrementsAcrossTangentFrames)
+  {
+    using analytic_derivative::BuildCasrAffineNullspaceProjector;
+    using SO3d = Sophus::SO3<double>;
+    const std::vector<double> times{0.0, 0.08, 0.31, 0.77};
+    Eigen::aligned_vector<SO3d> references;
+    for (double time : times)
+    {
+      references.emplace_back(
+          SO3d::exp(Eigen::Vector3d(0.0, 0.0, 0.8 * time)));
+    }
+    const Eigen::MatrixXd projector =
+        BuildCasrAffineNullspaceProjector(times, references);
+    ASSERT_EQ(projector.rows(), 24);
+    EXPECT_LT((projector - projector.transpose()).norm(), 1e-12);
+    EXPECT_LT((projector * projector - projector).norm(), 1e-12);
+
+    Eigen::VectorXd affine_world_rotation = Eigen::VectorXd::Zero(24);
+    for (int i = 0; i < 4; ++i)
+    {
+      const Eigen::Vector3d world_increment =
+          Eigen::Vector3d(0.2, -0.1, 0.05) +
+          times[static_cast<size_t>(i)] *
+              Eigen::Vector3d(0.4, 0.3, -0.2);
+      affine_world_rotation.segment<3>(6 * i) =
+          references[static_cast<size_t>(i)].inverse() * world_increment;
+    }
+    EXPECT_LT((projector * affine_world_rotation).norm(), 1e-12);
+  }
+
+  TEST(CasrSplineContinuityFactor, PreservesAffineAndPenalizesNonAffineUpdate)
+  {
+    using analytic_derivative::BuildCasrAffineNullspaceProjector;
+    using analytic_derivative::CasrSplineContinuityFactor;
+    using SO3d = Sophus::SO3<double>;
+
+    const std::vector<double> times{0.0, 0.08, 0.31, 0.77};
+    const Eigen::MatrixXd projector =
+        BuildCasrAffineNullspaceProjector(times);
+    Eigen::MatrixXd basis = Eigen::MatrixXd::Zero(24, 1);
+    basis(6 * 2 + 3, 0) = 1.0;
+    Eigen::aligned_vector<SO3d> references(4, SO3d());
+    Eigen::aligned_vector<Eigen::Vector3d> reference_positions(
+        4, Eigen::Vector3d::Zero());
+    CasrSplineContinuityFactor factor(
+        basis, projector, references, reference_positions, 2.0,
+        Eigen::VectorXd::Ones(1));
+    ASSERT_TRUE(factor.IsValid());
+
+    Eigen::aligned_vector<SO3d> rotations(4, SO3d());
+    Eigen::aligned_vector<Eigen::Vector3d> positions(
+        4, Eigen::Vector3d::Zero());
+    for (int i = 0; i < 4; ++i)
+    {
+      positions[static_cast<size_t>(i)].x() =
+          0.4 + 1.7 * times[static_cast<size_t>(i)];
+    }
+    std::vector<double const *> blocks;
+    for (const SO3d &rotation : rotations)
+    {
+      blocks.emplace_back(rotation.data());
+    }
+    for (const Eigen::Vector3d &position : positions)
+    {
+      blocks.emplace_back(position.data());
+    }
+    double residual = 0.0;
+    ASSERT_TRUE(factor.Evaluate(blocks.data(), &residual, nullptr));
+    EXPECT_NEAR(residual, 0.0, 1e-12);
+
+    positions[2].x() += 0.5;
+    blocks.clear();
+    for (const SO3d &rotation : rotations)
+    {
+      blocks.emplace_back(rotation.data());
+    }
+    for (const Eigen::Vector3d &position : positions)
+    {
+      blocks.emplace_back(position.data());
+    }
+    ASSERT_TRUE(factor.Evaluate(blocks.data(), &residual, nullptr));
+    EXPECT_GT(std::abs(residual), 1e-2);
+  }
+
+  TEST(CasrCoupledConsensusFactor, StacksPropagationAndContinuityResiduals)
+  {
+    using analytic_derivative::BuildCasrAffineNullspaceProjector;
+    using analytic_derivative::CasrCoupledConsensusFactor;
+    using SO3d = Sophus::SO3<double>;
+
+    const std::vector<double> times{0.0, 0.08, 0.31, 0.77};
+    const Eigen::MatrixXd projector =
+        BuildCasrAffineNullspaceProjector(times);
+    Eigen::MatrixXd basis = Eigen::MatrixXd::Zero(24, 1);
+    basis(6 * 2 + 3, 0) = 1.0;
+    Eigen::aligned_vector<SO3d> references(4, SO3d());
+    Eigen::aligned_vector<Eigen::Vector3d> reference_positions(
+        4, Eigen::Vector3d::Zero());
+    CasrCoupledConsensusFactor factor(
+        basis, projector, references, reference_positions, 2.0,
+        Eigen::VectorXd::Ones(1));
+    ASSERT_TRUE(factor.IsValid());
+    EXPECT_EQ(factor.num_residuals(), 2);
+
+    Eigen::aligned_vector<SO3d> rotations(4, SO3d());
+    Eigen::aligned_vector<Eigen::Vector3d> positions(
+        4, Eigen::Vector3d::Zero());
+    positions[2].x() = 1.0;
+    std::vector<double const *> blocks;
+    for (const SO3d &rotation : rotations)
+    {
+      blocks.emplace_back(rotation.data());
+    }
+    for (const Eigen::Vector3d &position : positions)
+    {
+      blocks.emplace_back(position.data());
+    }
+    Eigen::Vector2d residual;
+    ASSERT_TRUE(factor.Evaluate(blocks.data(), residual.data(), nullptr));
+    EXPECT_NEAR(residual[0], 1.0 / std::sqrt(2.0), 1e-12);
+    EXPECT_NEAR(residual[1],
+                projector(6 * 2 + 3, 6 * 2 + 3) /
+                    std::sqrt(2.0),
+                1e-12);
   }
 
 } // namespace cocolic

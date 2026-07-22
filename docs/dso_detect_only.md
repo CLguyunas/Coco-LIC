@@ -79,7 +79,7 @@ When it is enabled, exact support analysis, CASR shadow recovery, the scheduler,
 and all audit CSV streams are enabled together. These components remain
 read-only; the estimator changes only when both intervention switches are
 true. The separate Stage-5 gate still revalidates the candidate before adding
-one ephemeral factor.
+a cause-specific ephemeral factor.
 
 ## Output
 
@@ -433,92 +433,121 @@ or the marginalization prior. Shadow-only execution is enforced by the class
 boundary rather than a YAML promise. Its output is consumed only by the
 separately armed intervention described next.
 
-## Stage 5: CASR estimator intervention
+## Stage 5: cause-differential CASR intervention
 
-The intervention implements an anisotropic soft anchor in the exact `6K`
-knot space. Immediately after IMU propagation and before the LIC iterations,
-it copies only the recent control-point suffix. If the final-iteration CASR
-result is valid, schedulable, route-consistent, `recovery_ready`, active, and
-numerically well formed, the factor uses the pre-LIC control points as its
-reference. For each covered control point it forms
+Stage 5 no longer sends all three causes through one pose-anchor factor.  The
+route now determines the recovery information source **and** the residual
+operator.  Immediately after the prior/IMU prediction and before final LIC,
+the recent control-point suffix is copied as the propagation reference.  For
+the covered knots define the scaled increment
 
 ```text
-delta = [r*Log(R_reference^-1 R_current),
-         p_current - p_reference].
+delta_i = [r*Log(R_reference_i^-1 R_i), p_i-p_reference_i]
+delta   = [delta_0; ...; delta_(K-1)].
 ```
 
-Before adding a factor, v2 asks Ceres for the robustified Jacobian of the
-unmodified final-LIC problem with respect to the active CASR knots. Rotation
-columns are converted from radians to the same characteristic-range metric as
-`[r*dtheta, dp]`. Let `H_s` be this scaled conditional knot Hessian. The code
-diagonalizes the recovery-space curvature
+For the non-uniform knot times `t_i`, the implementation centers and scales
+time to `tau_i` and forms `A=[1,tau]`.  The time-aware projector
 
 ```text
-C_r = B_r^T H_s B_r = U diag(h_i) U^T
-B_w = B_r U
-target = curvature_target_relative_to_max * lambda_max(H_s)
-w_i = clamp(activation * curvature_gain * (target - h_i),
+C_K = I - A (A^T A)^-1 A^T,
+T   = blockdiag(diag(R_reference_i, I_3)),
+C   = T^T (C_K kron I_6) T
+```
+
+first transports right-tangent SO(3) increments into a common world frame,
+annihilates every constant-velocity (affine-in-time) knot increment even when
+the knot spacing is non-uniform, and transports the result back. Translation
+increments already use world coordinates. It retains only non-affine temporal
+changes without comparing vectors expressed in different tangent frames.
+The code verifies that `C` is finite, symmetric, idempotent and has non-zero
+rank before any support-side factor is admitted.
+
+Let `B` be the temporally stable route basis after the final-LIC curvature
+rotation and let `W=diag(w_i)`.  The three implemented mechanisms are:
+
+```text
+environment degradation:
+    r_env = W^(1/2) B^T delta
+    source = prior/IMU propagation reference
+
+spline-support degradation:
+    r_sup = W^(1/2) B^T C delta
+    source = non-uniform spline increment continuity
+
+coupled degradation:
+    r_cpl = (1/sqrt(2)) [W^(1/2) B^T delta;
+                         W^(1/2) B^T C delta]
+    source = propagation and continuity consensus
+```
+
+The environment branch therefore prevents a weak geometric direction from
+departing arbitrarily from propagated motion.  The support branch does **not**
+pull every knot back to the same pose snapshot: affine translation and
+rotation increments remain in the nullspace, while non-affine knot-to-knot
+distortion is regularized.  The coupled branch uses both residuals only in the
+common weak subspace.  It splits the information by `1/sqrt(2)` so merely
+stacking two sources does not double the configured information.
+
+For an armed coupled frame, the unmodified same-frame solution is evaluated
+first.  With
+
+```text
+e = B^T delta_baseline,
+s = B^T C delta_baseline,
+rho = e^T s / (||e|| ||s||),
+```
+
+both source norms must be non-negligible and `rho >= 0`.  Insufficient evidence
+is logged as `source_consensus_insufficient`; opposing corrections are logged
+as `source_consensus_conflict`.  Both states commit the already solved baseline
+and add no CASR factor.  This gate is deliberately a fixed sign-consistency
+rule, not another dataset-tuned threshold.
+
+Curvature matching now controls recovery **strength only**.  Before adding a
+factor, Ceres evaluates the robustified Jacobian of the unmodified final-LIC
+problem and forms the scaled conditional knot Hessian `H_s`.  The code uses
+
+```text
+B^T H_s B = U diag(h_i) U^T,
+B <- B U,
+target = curvature_target_relative_to_max * lambda_max(H_s),
+w_i = clamp(activation * curvature_gain * (target-h_i),
             0,
-            curvature_max_added_relative_to_max * lambda_max(H_s))
-residual_i = sqrt(w_i) * B_w(:,i)^T delta.
+            curvature_max_added_relative_to_max * lambda_max(H_s)).
 ```
 
-Thus every recovery direction receives only its measured curvature deficit;
-directions already above the target receive zero added information. If all
-directions are sufficient the frame is logged as `curvature_sufficient` and no
-factor is added. Invalid or near-zero reference curvature fails closed as
-`curvature_invalid`. Production configuration always uses curvature matching;
-the legacy scalar path remains internal only for compatibility tests.
+Directions already above the target receive zero added information.  Invalid
+or near-zero curvature fails closed.  Curvature matching does not select the
+cause, reference source or residual operator.
 
-Only diagnosed recovery coordinates are damped. Updates in the orthogonal,
-observable complement remain unconstrained by this factor. The SO(3) Jacobian
-uses the exact right-Jacobian inverse corresponding to Coco-LIC's right
-perturbation. The factor is added only to the final LIC refinement and is never
-inserted into `UpdateLICPrior`; a transient diagnosis cannot pollute the
-long-lived marginalization prior.
+All factors use the exact SO(3) right-Jacobian inverse required by Coco-LIC's
+right perturbation.  They exist only in the final LIC refinement and are never
+inserted into `UpdateLICPrior`; a transient diagnosis cannot contaminate the
+long-lived marginalization prior.  The estimator boundary independently
+rechecks provenance, route stability, scheduler state, basis orthonormality,
+control-point range, timestamp-matched reference and temporal-operator
+validity.
 
-The intervention repeats the following hard gates independently of the
-scheduler: valid CASR input, one of the three schedulable routes, raw/stable
-route agreement, `recovery_ready`, active scheduler, activation floor, finite
-orthonormal basis, configured rank/dimension bounds, current control-point
-range, an explicit `RealMeasurements` provenance tag, and an exact
-timestamp-matched pre-LIC reference. `inactive`, `coupled_conflict`, stale
-routes, diagnostics-copy results, or missing references always produce zero
-estimator factors. The provenance check is repeated at the estimator boundary;
-it does not rely only on the caller selecting the real result.
+Counterfactual validation remains fixed on.  The unmodified and cause-specific
+problems start from the exact same complete Ceres parameter snapshot.  A failed
+CASR solve restores the already validated baseline solution; it is never
+committed silently.
 
-Counterfactual validation is fixed on: every parameter block registered in
-the final Ceres problem is snapshotted. The unmodified baseline is solved and
-measured first; then the exact pre-solve snapshot is restored and the CASR
-problem is solved. This produces a same-frame, same-initial-state comparison.
-The baseline solution snapshot is also retained: if the CASR solve is unusable,
-the factor is removed and the already validated baseline solution is restored.
-If a baseline snapshot is unavailable, the previous remove-and-resolve fallback
-is used. Thus a failed CASR attempt is never committed silently.
-
-With `casr_intervention.enabled: true`, a fourth audit file is written:
-
-```text
-data/degenerate_seq_02_casr_intervention.csv
-```
-
-Its `state` distinguishes safety blocks, `dry_run`, `applied`, recovered
-solver failure, and unrecovered solver failure. It records source provenance,
-requested/used activation, effective information, control-point range/rank,
-factor-added/committed flags, primary/fallback solver status, projected LIC
-curvatures, per-direction added-information summaries, and the total,
-projected, and orthogonal scaled increments. The decisive effectiveness fields
-are `projected_casr_over_counterfactual` and
-`orthogonal_casr_over_counterfactual`, which compare the CASR and unmodified
-solutions of the same frame from the same initial state.
+With `casr_intervention.enabled: true`, the intervention CSV additionally
+records `recovery_mechanism`, `recovery_reference`, continuity-operator rank
+and numerical errors, per-source residual norms, and all coupled-consensus
+flags/scores.  `tools/analyze_casr_intervention.py` rejects a support/coupled
+factor without a valid continuity operator and rejects a coupled factor that
+bypasses the source-consensus gate.
 
 Use the two-switch sequence deliberately:
 
-1. `enabled: true`, `apply_to_estimator: false`: validate curvature extraction,
-   routing, and the automatically computed direction weights without changing
-   the estimator;
+1. `enabled: true`, `apply_to_estimator: false`: validate route-to-mechanism
+   mapping, continuity construction, curvature extraction and weights without
+   changing the estimator;
 2. `enabled: true`, `apply_to_estimator: true`: enable same-frame
-   counterfactual solving and the curvature-matched factor;
+   counterfactual solving and the routed cause-specific factor;
 3. use the logged same-frame ratio as the primary factor-effect test, then use
    complete-trajectory ATE/RPE as the end-to-end accuracy test. Do not tune the
    detector thresholds during this validation.
@@ -531,11 +560,11 @@ python3 tools/analyze_casr_intervention.py \
   --run armed=data/sequence_armed_casr_intervention.csv
 ```
 
-The command exits nonzero for source leakage, inconsistent factor/commit
-flags, a factor added while `apply_to_estimator` is false, non-finite metrics,
-or invalid fallback-state combinations. It reports dry-run post/pre metrics,
-curvature-matched added information, and median/p90 CASR-to-same-frame-baseline
-ratios for the diagnosed projection and its orthogonal complement.
+The command exits nonzero for source leakage, route/mechanism mismatch,
+continuity or consensus bypass, inconsistent factor/commit flags, a dry-run
+factor, non-finite metrics, or invalid fallback-state combinations. It reports
+mechanism/reference counts, coupled-consensus counts, curvature-matched added
+information and same-frame CASR/baseline ratios.
 
 ## Baseline non-interference check
 

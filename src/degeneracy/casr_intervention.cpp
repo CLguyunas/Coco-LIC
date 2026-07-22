@@ -51,6 +51,38 @@ namespace cocolic
     }
   } // namespace
 
+  const char *CasrRecoveryMechanismName(CasrRecoveryMechanism mechanism)
+  {
+    switch (mechanism)
+    {
+    case CasrRecoveryMechanism::PropagationReference:
+      return "propagation_reference";
+    case CasrRecoveryMechanism::SplineIncrementContinuity:
+      return "spline_increment_continuity";
+    case CasrRecoveryMechanism::CoupledSourceConsensus:
+      return "coupled_source_consensus";
+    case CasrRecoveryMechanism::None:
+    default:
+      return "none";
+    }
+  }
+
+  const char *CasrRecoveryReferenceName(CasrRecoveryReference reference)
+  {
+    switch (reference)
+    {
+    case CasrRecoveryReference::ImuPriorPropagation:
+      return "imu_prior_propagation";
+    case CasrRecoveryReference::NonuniformSplineContinuity:
+      return "nonuniform_spline_continuity";
+    case CasrRecoveryReference::PropagationAndSplineConsensus:
+      return "propagation_and_spline_consensus";
+    case CasrRecoveryReference::None:
+    default:
+      return "none";
+    }
+  }
+
   const char *CasrInterventionStateName(CasrInterventionState state)
   {
     switch (state)
@@ -89,6 +121,12 @@ namespace cocolic
       return "curvature_invalid";
     case CasrInterventionState::CurvatureSufficient:
       return "curvature_sufficient";
+    case CasrInterventionState::InvalidTemporalSupport:
+      return "invalid_temporal_support";
+    case CasrInterventionState::SourceConsensusInsufficient:
+      return "source_consensus_insufficient";
+    case CasrInterventionState::SourceConsensusConflict:
+      return "source_consensus_conflict";
     default:
       return "unknown";
     }
@@ -130,6 +168,30 @@ namespace cocolic
     plan.control_point_num = casr_result.support_knot_dimension / 6;
     plan.recovery_rank = casr_result.recovery_rank;
 
+    switch (casr_result.route)
+    {
+    case CasrRoute::EnvironmentCandidate:
+      plan.recovery_mechanism =
+          CasrRecoveryMechanism::PropagationReference;
+      plan.recovery_reference =
+          CasrRecoveryReference::ImuPriorPropagation;
+      break;
+    case CasrRoute::SupportCandidate:
+      plan.recovery_mechanism =
+          CasrRecoveryMechanism::SplineIncrementContinuity;
+      plan.recovery_reference =
+          CasrRecoveryReference::NonuniformSplineContinuity;
+      break;
+    case CasrRoute::CoupledCommonCandidate:
+      plan.recovery_mechanism =
+          CasrRecoveryMechanism::CoupledSourceConsensus;
+      plan.recovery_reference =
+          CasrRecoveryReference::PropagationAndSplineConsensus;
+      break;
+    default:
+      break;
+    }
+
     if (!casr_result.valid || !std::isfinite(characteristic_range) ||
         characteristic_range <= 0.0)
     {
@@ -144,6 +206,17 @@ namespace cocolic
     if (!IsSchedulableRoute(casr_result.route))
     {
       plan.state = CasrInterventionState::UnsafeRoute;
+      return plan;
+    }
+    if (plan.recovery_mechanism ==
+            CasrRecoveryMechanism::CoupledSourceConsensus &&
+        !config.counterfactual_validation)
+    {
+      // The coupled mechanism is defined by agreement of the two source
+      // corrections on the same-frame baseline.  It must never silently
+      // degrade to an ungated stacked factor.
+      plan.state =
+          CasrInterventionState::SourceConsensusInsufficient;
       return plan;
     }
     if (casr_result.route != casr_result.stable_route)
@@ -314,6 +387,40 @@ namespace cocolic
                      ? CasrInterventionState::Applied
                      : CasrInterventionState::DryRun;
     return true;
+  }
+
+  CasrSourceConsensus EvaluateCasrSourceConsensus(
+      const Eigen::VectorXd &environment_coordinates,
+      const Eigen::VectorXd &support_coordinates)
+  {
+    CasrSourceConsensus result;
+    result.evaluated = true;
+    if (environment_coordinates.size() <= 0 ||
+        environment_coordinates.size() != support_coordinates.size() ||
+        !environment_coordinates.allFinite() ||
+        !support_coordinates.allFinite())
+    {
+      return result;
+    }
+
+    result.environment_norm = environment_coordinates.norm();
+    result.support_norm = support_coordinates.norm();
+    if (!std::isfinite(result.environment_norm) ||
+        !std::isfinite(result.support_norm) ||
+        result.environment_norm < dso_fixed::kSourceConsensusMinNorm ||
+        result.support_norm < dso_fixed::kSourceConsensusMinNorm)
+    {
+      return result;
+    }
+
+    result.sufficient = true;
+    result.cosine = environment_coordinates.dot(support_coordinates) /
+                    (result.environment_norm * result.support_norm);
+    result.cosine = std::clamp(result.cosine, -1.0, 1.0);
+    result.consistent =
+        std::isfinite(result.cosine) &&
+        result.cosine >= dso_fixed::kSourceConsensusMinCosine;
+    return result;
   }
 
 } // namespace cocolic

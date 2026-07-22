@@ -253,6 +253,25 @@ namespace cocolic
         Eigen::aligned_vector<SO3d> &reference_rotations,
         Eigen::aligned_vector<Eigen::Vector3d> &reference_positions) const;
 
+    bool BuildCasrContinuityProjector(
+        const CasrInterventionPlan &plan,
+        const Eigen::aligned_vector<SO3d> &reference_rotations,
+        Eigen::MatrixXd &affine_nullspace_projector,
+        CasrInterventionReport &report) const;
+
+    bool ComputeCasrSourceCoordinates(
+        const CasrInterventionPlan &plan,
+        const Eigen::MatrixXd &recovery_basis,
+        const Eigen::MatrixXd &affine_nullspace_projector,
+        const Eigen::aligned_vector<SO3d> &reference_rotations,
+        const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
+        Eigen::VectorXd &environment_coordinates,
+        Eigen::VectorXd &support_coordinates,
+        double *total_increment_norm = nullptr,
+        double *orthogonal_increment_norm = nullptr,
+        double *max_rotation_increment_rad = nullptr,
+        double *max_translation_increment_m = nullptr) const;
+
     enum class CasrMeasurementStage
     {
       PreSolve,
@@ -263,6 +282,7 @@ namespace cocolic
     void MeasureCasrIncrement(
         const CasrInterventionPlan &plan,
         const Eigen::MatrixXd &recovery_basis,
+        const Eigen::MatrixXd &affine_nullspace_projector,
         const Eigen::aligned_vector<SO3d> &reference_rotations,
         const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
         CasrMeasurementStage stage,

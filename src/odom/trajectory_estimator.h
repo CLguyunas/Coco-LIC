@@ -271,9 +271,11 @@ namespace cocolic
         MarginalizationInfo::Ptr &last_marginalization_info,
         std::vector<double *> &last_marginalization_parameter_blocks);
 
-    ceres::ResidualBlockId AddCasrSubspaceIntervention(
+    ceres::ResidualBlockId AddCasrCauseDrivenIntervention(
+        CasrRecoveryMechanism recovery_mechanism,
         int control_point_start_index,
         const Eigen::MatrixXd &recovery_basis,
+        const Eigen::MatrixXd &affine_nullspace_projector,
         const Eigen::aligned_vector<SO3d> &reference_rotations,
         const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
         double characteristic_range,

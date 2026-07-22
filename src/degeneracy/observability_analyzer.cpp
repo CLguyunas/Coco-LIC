@@ -1652,6 +1652,8 @@ namespace cocolic
         << "scan_timestamp_s,method_version,state_code,state,enabled,"
            "apply_to_estimator,eligible,factor_added,applied,"
            "data_source_code,route_code,route,"
+           "recovery_mechanism_code,recovery_mechanism,"
+           "recovery_reference_code,recovery_reference,"
            "control_point_start_index,control_point_num,recovery_rank,"
            "requested_activation_strength,used_activation_strength,"
            "characteristic_range,base_information_weight,"
@@ -1672,6 +1674,10 @@ namespace cocolic
            "recovery_curvature_min,recovery_curvature_median,"
            "recovery_curvature_max,added_information_min,"
            "added_information_median,added_information_max,"
+           "continuity_operator_valid,continuity_operator_rank,"
+           "continuity_symmetry_error,continuity_idempotence_error,"
+           "pre_environment_residual_norm,pre_support_residual_norm,"
+           "post_environment_residual_norm,post_support_residual_norm,"
            "counterfactual_enabled,counterfactual_solver_usable,"
            "counterfactual_solver_successful_steps,"
            "counterfactual_solver_unsuccessful_steps,"
@@ -1679,6 +1685,10 @@ namespace cocolic
            "counterfactual_projected_increment_norm,"
            "counterfactual_orthogonal_increment_norm,"
            "counterfactual_factor_residual_norm,"
+           "counterfactual_environment_residual_norm,"
+           "counterfactual_support_residual_norm,"
+           "source_consensus_evaluated,source_consensus_sufficient,"
+           "source_consensus_consistent,source_consensus_cosine,"
            "projected_casr_over_counterfactual,"
            "orthogonal_casr_over_counterfactual\n";
     intervention_csv_stream_.flush();
@@ -1705,6 +1715,10 @@ namespace cocolic
         << static_cast<int>(report.data_source) << ','
         << static_cast<int>(report.route) << ','
         << CasrRouteName(report.route) << ','
+        << static_cast<int>(report.recovery_mechanism) << ','
+        << CasrRecoveryMechanismName(report.recovery_mechanism) << ','
+        << static_cast<int>(report.recovery_reference) << ','
+        << CasrRecoveryReferenceName(report.recovery_reference) << ','
         << report.control_point_start_index << ','
         << report.control_point_num << ','
         << report.recovery_rank << ','
@@ -1744,6 +1758,14 @@ namespace cocolic
         << report.added_information_min << ','
         << report.added_information_median << ','
         << report.added_information_max << ','
+        << static_cast<int>(report.continuity_operator_valid) << ','
+        << report.continuity_operator_rank << ','
+        << report.continuity_symmetry_error << ','
+        << report.continuity_idempotence_error << ','
+        << report.pre_environment_residual_norm << ','
+        << report.pre_support_residual_norm << ','
+        << report.post_environment_residual_norm << ','
+        << report.post_support_residual_norm << ','
         << static_cast<int>(report.counterfactual_enabled) << ','
         << static_cast<int>(report.counterfactual_solver_usable) << ','
         << report.counterfactual_solver_successful_steps << ','
@@ -1752,6 +1774,12 @@ namespace cocolic
         << report.counterfactual_projected_increment_norm << ','
         << report.counterfactual_orthogonal_increment_norm << ','
         << report.counterfactual_factor_residual_norm << ','
+        << report.counterfactual_environment_residual_norm << ','
+        << report.counterfactual_support_residual_norm << ','
+        << static_cast<int>(report.source_consensus_evaluated) << ','
+        << static_cast<int>(report.source_consensus_sufficient) << ','
+        << static_cast<int>(report.source_consensus_consistent) << ','
+        << report.source_consensus_cosine << ','
         << report.projected_casr_over_counterfactual << ','
         << report.orthogonal_casr_over_counterfactual << '\n';
     intervention_csv_stream_.flush();

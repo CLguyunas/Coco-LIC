@@ -59,6 +59,10 @@ dso_detect_only:
         projector_similarity_threshold: 8.0e-1
 
     # Experiment mode switches plus the only estimator-strength parameter.
+    # The route selects a fixed cause-specific mechanism automatically:
+    # environment=IMU/prior propagation reference;
+    # support=non-uniform spline increment continuity;
+    # coupled=common-subspace dual-source consensus.
     # Keep apply_to_estimator=false for dry-run audit; set it true only for an
     # armed run. The validated starting gain is 0.01.
     casr_intervention:

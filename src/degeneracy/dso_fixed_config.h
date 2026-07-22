@@ -71,5 +71,13 @@ namespace cocolic
     inline constexpr int kInterventionMaxControlPoints = 32;
     inline constexpr int kMaxRecoveryRank = 32;
     inline constexpr double kMaxBasisOrthogonalityError = 1e-6;
+
+    // Cause-specific recovery safeguards.  The coupled branch is admitted
+    // only when the propagation-reference and spline-continuity corrections
+    // have non-negligible magnitude and a non-negative cosine.  This is a
+    // sign-consistency safety rule, not a dataset-tuned method parameter.
+    inline constexpr double kSourceConsensusMinNorm = 1e-8;
+    inline constexpr double kSourceConsensusMinCosine = 0.0;
+    inline constexpr double kContinuityProjectorTolerance = 1e-8;
   } // namespace dso_fixed
 } // namespace cocolic

@@ -22,6 +22,9 @@
 #include <ros/assert.h>
 #include <utils/log_utils.h>
 
+#include <Eigen/Eigenvalues>
+#include <Eigen/SVD>
+
 #include <fstream>
 std::fstream myfile_t_ba;
 namespace cocolic
@@ -400,14 +403,99 @@ namespace cocolic
     return true;
   }
 
-  void TrajectoryManager::MeasureCasrIncrement(
+  bool TrajectoryManager::BuildCasrContinuityProjector(
       const CasrInterventionPlan &plan,
-      const Eigen::MatrixXd &recovery_basis,
       const Eigen::aligned_vector<SO3d> &reference_rotations,
-      const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
-      CasrMeasurementStage stage,
+      Eigen::MatrixXd &affine_nullspace_projector,
       CasrInterventionReport &report) const
   {
+    affine_nullspace_projector.resize(0, 0);
+    report.continuity_operator_valid = false;
+    report.continuity_operator_rank = 0;
+    report.continuity_symmetry_error = 0.0;
+    report.continuity_idempotence_error = 0.0;
+    if (plan.recovery_mechanism ==
+        CasrRecoveryMechanism::PropagationReference)
+    {
+      return true;
+    }
+    if (plan.control_point_num < 3 || plan.control_point_start_index < 0 ||
+        plan.control_point_start_index + plan.control_point_num >
+            static_cast<int>(trajectory_->knts.size()))
+    {
+      return false;
+    }
+
+    std::vector<double> knot_times_seconds;
+    knot_times_seconds.reserve(static_cast<size_t>(plan.control_point_num));
+    for (int i = 0; i < plan.control_point_num; ++i)
+    {
+      const int knot_index = plan.control_point_start_index + i;
+      knot_times_seconds.emplace_back(
+          trajectory_->knts[static_cast<size_t>(knot_index)] * NS_TO_S);
+    }
+    affine_nullspace_projector =
+        analytic_derivative::BuildCasrAffineNullspaceProjector(
+            knot_times_seconds, reference_rotations);
+    const int dimension = 6 * plan.control_point_num;
+    if (affine_nullspace_projector.rows() != dimension ||
+        affine_nullspace_projector.cols() != dimension ||
+        !affine_nullspace_projector.allFinite())
+    {
+      affine_nullspace_projector.resize(0, 0);
+      return false;
+    }
+
+    report.continuity_symmetry_error =
+        (affine_nullspace_projector -
+         affine_nullspace_projector.transpose())
+            .cwiseAbs()
+            .maxCoeff();
+    report.continuity_idempotence_error =
+        (affine_nullspace_projector * affine_nullspace_projector -
+         affine_nullspace_projector)
+            .cwiseAbs()
+            .maxCoeff();
+    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(
+        affine_nullspace_projector);
+    if (solver.info() != Eigen::Success ||
+        !solver.eigenvalues().allFinite())
+    {
+      affine_nullspace_projector.resize(0, 0);
+      return false;
+    }
+    report.continuity_operator_rank =
+        static_cast<int>((solver.eigenvalues().array() >
+                          dso_fixed::kContinuityProjectorTolerance)
+                             .count());
+    report.continuity_operator_valid =
+        report.continuity_symmetry_error <=
+            dso_fixed::kContinuityProjectorTolerance &&
+        report.continuity_idempotence_error <=
+            dso_fixed::kContinuityProjectorTolerance &&
+        report.continuity_operator_rank > 0;
+    if (!report.continuity_operator_valid)
+    {
+      affine_nullspace_projector.resize(0, 0);
+    }
+    return report.continuity_operator_valid;
+  }
+
+  bool TrajectoryManager::ComputeCasrSourceCoordinates(
+      const CasrInterventionPlan &plan,
+      const Eigen::MatrixXd &recovery_basis,
+      const Eigen::MatrixXd &affine_nullspace_projector,
+      const Eigen::aligned_vector<SO3d> &reference_rotations,
+      const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
+      Eigen::VectorXd &environment_coordinates,
+      Eigen::VectorXd &support_coordinates,
+      double *total_increment_norm,
+      double *orthogonal_increment_norm,
+      double *max_rotation_increment_rad,
+      double *max_translation_increment_m) const
+  {
+    environment_coordinates.resize(0);
+    support_coordinates.resize(0);
     if (plan.control_point_num <= 0 || plan.recovery_rank <= 0 ||
         recovery_basis.rows() != 6 * plan.control_point_num ||
         recovery_basis.cols() != plan.recovery_rank ||
@@ -416,13 +504,13 @@ namespace cocolic
         static_cast<int>(reference_positions.size()) !=
             plan.control_point_num)
     {
-      return;
+      return false;
     }
 
     Eigen::VectorXd scaled_increment =
         Eigen::VectorXd::Zero(6 * plan.control_point_num);
-    double max_rotation_increment_rad = 0.0;
-    double max_translation_increment_m = 0.0;
+    double max_rotation = 0.0;
+    double max_translation = 0.0;
     for (int i = 0; i < plan.control_point_num; ++i)
     {
       const size_t knot_index = static_cast<size_t>(
@@ -434,28 +522,112 @@ namespace cocolic
       const Eigen::Vector3d translation_increment =
           trajectory_->getKnotPos(knot_index) -
           reference_positions[static_cast<size_t>(i)];
+      if (!rotation_increment.allFinite() ||
+          !translation_increment.allFinite())
+      {
+        return false;
+      }
       scaled_increment.segment<3>(6 * i) =
           plan.characteristic_range * rotation_increment;
       scaled_increment.segment<3>(6 * i + 3) = translation_increment;
-      max_rotation_increment_rad = std::max(
-          max_rotation_increment_rad, rotation_increment.norm());
-      max_translation_increment_m = std::max(
-          max_translation_increment_m, translation_increment.norm());
+      max_rotation = std::max(max_rotation, rotation_increment.norm());
+      max_translation =
+          std::max(max_translation, translation_increment.norm());
     }
 
-    const Eigen::VectorXd projected_coordinates =
-        recovery_basis.transpose() * scaled_increment;
-    const Eigen::VectorXd orthogonal_increment =
-        scaled_increment - recovery_basis * projected_coordinates;
-    const double total_norm = scaled_increment.norm();
-    const double projected_norm = projected_coordinates.norm();
-    const double orthogonal_norm = orthogonal_increment.norm();
-    double factor_residual_norm = 0.0;
-    if (plan.sqrt_information_weights.size() == projected_coordinates.size())
+    environment_coordinates = recovery_basis.transpose() * scaled_increment;
+    if (!environment_coordinates.allFinite())
     {
-      factor_residual_norm =
+      return false;
+    }
+    if (affine_nullspace_projector.rows() == scaled_increment.size() &&
+        affine_nullspace_projector.cols() == scaled_increment.size())
+    {
+      support_coordinates = recovery_basis.transpose() *
+                            affine_nullspace_projector * scaled_increment;
+      if (!support_coordinates.allFinite())
+      {
+        return false;
+      }
+    }
+    else
+    {
+      support_coordinates = Eigen::VectorXd::Zero(plan.recovery_rank);
+    }
+
+    if (total_increment_norm)
+    {
+      *total_increment_norm = scaled_increment.norm();
+    }
+    if (orthogonal_increment_norm)
+    {
+      *orthogonal_increment_norm =
+          (scaled_increment -
+           recovery_basis * environment_coordinates)
+              .norm();
+    }
+    if (max_rotation_increment_rad)
+    {
+      *max_rotation_increment_rad = max_rotation;
+    }
+    if (max_translation_increment_m)
+    {
+      *max_translation_increment_m = max_translation;
+    }
+    return true;
+  }
+
+  void TrajectoryManager::MeasureCasrIncrement(
+      const CasrInterventionPlan &plan,
+      const Eigen::MatrixXd &recovery_basis,
+      const Eigen::MatrixXd &affine_nullspace_projector,
+      const Eigen::aligned_vector<SO3d> &reference_rotations,
+      const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
+      CasrMeasurementStage stage,
+      CasrInterventionReport &report) const
+  {
+    Eigen::VectorXd environment_coordinates;
+    Eigen::VectorXd support_coordinates;
+    double total_norm = 0.0;
+    double orthogonal_norm = 0.0;
+    double max_rotation_increment_rad = 0.0;
+    double max_translation_increment_m = 0.0;
+    if (!ComputeCasrSourceCoordinates(
+            plan, recovery_basis, affine_nullspace_projector,
+            reference_rotations, reference_positions,
+            environment_coordinates, support_coordinates, &total_norm,
+            &orthogonal_norm, &max_rotation_increment_rad,
+            &max_translation_increment_m))
+    {
+      return;
+    }
+    const double projected_norm = environment_coordinates.norm();
+    const double environment_norm = environment_coordinates.norm();
+    const double support_norm = support_coordinates.norm();
+    double factor_residual_norm = 0.0;
+    if (plan.sqrt_information_weights.size() == environment_coordinates.size())
+    {
+      const double environment_weighted =
           (plan.sqrt_information_weights.array() *
-           projected_coordinates.array()).matrix().norm();
+           environment_coordinates.array()).matrix().squaredNorm();
+      const double support_weighted =
+          (plan.sqrt_information_weights.array() *
+           support_coordinates.array()).matrix().squaredNorm();
+      if (plan.recovery_mechanism ==
+          CasrRecoveryMechanism::SplineIncrementContinuity)
+      {
+        factor_residual_norm = std::sqrt(support_weighted);
+      }
+      else if (plan.recovery_mechanism ==
+               CasrRecoveryMechanism::CoupledSourceConsensus)
+      {
+        factor_residual_norm =
+            std::sqrt(0.5 * (environment_weighted + support_weighted));
+      }
+      else
+      {
+        factor_residual_norm = std::sqrt(environment_weighted);
+      }
     }
     else
     {
@@ -468,6 +640,8 @@ namespace cocolic
       report.post_projected_increment_norm = projected_norm;
       report.post_orthogonal_increment_norm = orthogonal_norm;
       report.post_factor_residual_norm = factor_residual_norm;
+      report.post_environment_residual_norm = environment_norm;
+      report.post_support_residual_norm = support_norm;
       report.max_rotation_increment_rad = max_rotation_increment_rad;
       report.max_translation_increment_m = max_translation_increment_m;
     }
@@ -477,6 +651,8 @@ namespace cocolic
       report.counterfactual_projected_increment_norm = projected_norm;
       report.counterfactual_orthogonal_increment_norm = orthogonal_norm;
       report.counterfactual_factor_residual_norm = factor_residual_norm;
+      report.counterfactual_environment_residual_norm = environment_norm;
+      report.counterfactual_support_residual_norm = support_norm;
     }
     else
     {
@@ -484,6 +660,8 @@ namespace cocolic
       report.pre_projected_increment_norm = projected_norm;
       report.pre_orthogonal_increment_norm = orthogonal_norm;
       report.pre_factor_residual_norm = factor_residual_norm;
+      report.pre_environment_residual_norm = environment_norm;
+      report.pre_support_residual_norm = support_norm;
     }
   }
 
@@ -654,6 +832,7 @@ namespace cocolic
 
     CasrInterventionPlan casr_plan;
     Eigen::MatrixXd casr_recovery_basis;
+    Eigen::MatrixXd casr_continuity_projector;
     Eigen::aligned_vector<SO3d> casr_reference_rotations;
     Eigen::aligned_vector<Eigen::Vector3d> casr_reference_positions;
     bool casr_measurement_ready = false;
@@ -666,6 +845,10 @@ namespace cocolic
           casr_plan.control_point_num;
       last_casr_intervention_report_.recovery_rank =
           casr_plan.recovery_rank;
+      last_casr_intervention_report_.recovery_mechanism =
+          casr_plan.recovery_mechanism;
+      last_casr_intervention_report_.recovery_reference =
+          casr_plan.recovery_reference;
       last_casr_intervention_report_.requested_activation_strength =
           casr_plan.requested_activation_strength;
       last_casr_intervention_report_.used_activation_strength =
@@ -719,6 +902,37 @@ namespace cocolic
         }
         else
         {
+          if (!BuildCasrContinuityProjector(
+                  casr_plan, casr_reference_rotations,
+                  casr_continuity_projector,
+                  last_casr_intervention_report_))
+          {
+            casr_plan.eligible = false;
+            casr_plan.state =
+                CasrInterventionState::InvalidTemporalSupport;
+          }
+          if (casr_plan.eligible &&
+              casr_plan.recovery_mechanism !=
+                  CasrRecoveryMechanism::PropagationReference)
+          {
+            const Eigen::MatrixXd continuity_basis =
+                casr_continuity_projector *
+                casr_result->recovery_knot_basis;
+            const Eigen::JacobiSVD<Eigen::MatrixXd> continuity_svd(
+                continuity_basis, Eigen::ComputeThinU |
+                                      Eigen::ComputeThinV);
+            if (continuity_svd.info() != Eigen::Success ||
+                continuity_svd.singularValues().size() !=
+                    casr_plan.recovery_rank ||
+                !continuity_svd.singularValues().allFinite() ||
+                continuity_svd.singularValues().minCoeff() <=
+                    dso_fixed::kContinuityProjectorTolerance)
+            {
+              casr_plan.eligible = false;
+              casr_plan.state =
+                  CasrInterventionState::InvalidTemporalSupport;
+            }
+          }
           if (casr_intervention_config_.curvature_matching_enabled)
           {
             CasrCurvatureEstimate curvature_estimate;
@@ -748,6 +962,7 @@ namespace cocolic
           {
             MeasureCasrIncrement(
                 casr_plan, casr_recovery_basis,
+                casr_continuity_projector,
                 casr_reference_rotations, casr_reference_positions,
                 CasrMeasurementStage::PreSolve,
                 last_casr_intervention_report_);
@@ -797,13 +1012,58 @@ namespace cocolic
       last_casr_intervention_report_.counterfactual_solver_unsuccessful_steps =
           counterfactual_summary.num_unsuccessful_steps;
       MeasureCasrIncrement(
-          casr_plan, casr_recovery_basis, casr_reference_rotations,
+          casr_plan, casr_recovery_basis, casr_continuity_projector,
+          casr_reference_rotations,
           casr_reference_positions,
           CasrMeasurementStage::Counterfactual,
           last_casr_intervention_report_);
       if (counterfactual_summary.IsSolutionUsable())
       {
         counterfactual_solution = estimator->CaptureParameterSnapshot();
+      }
+      bool coupled_consensus_blocked = false;
+      if (counterfactual_summary.IsSolutionUsable() &&
+          casr_plan.recovery_mechanism ==
+              CasrRecoveryMechanism::CoupledSourceConsensus)
+      {
+        Eigen::VectorXd environment_coordinates;
+        Eigen::VectorXd support_coordinates;
+        if (ComputeCasrSourceCoordinates(
+                casr_plan, casr_recovery_basis,
+                casr_continuity_projector, casr_reference_rotations,
+                casr_reference_positions, environment_coordinates,
+                support_coordinates))
+        {
+          const CasrSourceConsensus consensus =
+              EvaluateCasrSourceConsensus(environment_coordinates,
+                                          support_coordinates);
+          last_casr_intervention_report_.source_consensus_evaluated =
+              consensus.evaluated;
+          last_casr_intervention_report_.source_consensus_sufficient =
+              consensus.sufficient;
+          last_casr_intervention_report_.source_consensus_consistent =
+              consensus.consistent;
+          last_casr_intervention_report_.source_consensus_cosine =
+              consensus.cosine;
+          coupled_consensus_blocked =
+              !consensus.sufficient || !consensus.consistent;
+          if (coupled_consensus_blocked)
+          {
+            casr_plan.eligible = false;
+            casr_plan.state = consensus.sufficient
+                                  ? CasrInterventionState::SourceConsensusConflict
+                                  : CasrInterventionState::SourceConsensusInsufficient;
+            sync_casr_plan_to_report();
+          }
+        }
+        else
+        {
+          coupled_consensus_blocked = true;
+          casr_plan.eligible = false;
+          casr_plan.state =
+              CasrInterventionState::SourceConsensusInsufficient;
+          sync_casr_plan_to_report();
+        }
       }
       if (!estimator->RestoreParameterSnapshot(initial_snapshot))
       {
@@ -822,12 +1082,28 @@ namespace cocolic
         }
         summary = counterfactual_summary;
       }
+      else if (coupled_consensus_blocked)
+      {
+        skip_casr_solve = true;
+        if (!counterfactual_solution.empty())
+        {
+          committed_state_valid =
+              estimator->RestoreParameterSnapshot(counterfactual_solution);
+        }
+        else
+        {
+          committed_state_valid = false;
+        }
+        summary = counterfactual_summary;
+      }
     }
 
     if (factor_requested && initial_state_available && !skip_casr_solve)
     {
-      casr_residual_block_id = estimator->AddCasrSubspaceIntervention(
+      casr_residual_block_id = estimator->AddCasrCauseDrivenIntervention(
+          casr_plan.recovery_mechanism,
           casr_plan.control_point_start_index, casr_recovery_basis,
+          casr_continuity_projector,
           casr_reference_rotations, casr_reference_positions,
           casr_plan.characteristic_range,
           casr_plan.sqrt_information_weights);
@@ -937,6 +1213,7 @@ namespace cocolic
     {
       MeasureCasrIncrement(
           casr_plan, casr_recovery_basis,
+          casr_continuity_projector,
           casr_reference_rotations, casr_reference_positions,
           CasrMeasurementStage::PostSolve,
           last_casr_intervention_report_);
