@@ -837,14 +837,14 @@ namespace cocolic
     if (casr_intervention_config_.enabled && casr_result &&
         casr_result->data_source == CasrDataSource::RealMeasurements &&
         casr_result->support_control_point_start_index >= 0 &&
-        casr_result->support_knot_basis.rows() > 0 &&
-        casr_result->support_knot_basis.cols() > 0)
+        casr_result->support_audit_knot_basis.rows() > 0 &&
+        casr_result->support_audit_knot_basis.cols() > 0)
     {
       CasrCurvatureEstimate support_curvature;
       if (estimator->EvaluateCasrProjectedCurvature(
               casr_result->support_control_point_start_index,
               casr_characteristic_range,
-              casr_result->support_knot_basis,
+              casr_result->support_audit_knot_basis,
               support_curvature) &&
           support_curvature.valid &&
           support_curvature.recovery_curvatures.size() > 0)
