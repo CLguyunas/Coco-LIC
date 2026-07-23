@@ -84,7 +84,7 @@ namespace cocolic
     int support_temporal_bin_num = 0;
     int support_occupied_temporal_bin_num = 0;
     double support_occupied_temporal_bin_ratio = 0.0;
-    double support_temporal_mass_l1 = 0.0;
+    double support_temporal_mass_total_variation = 0.0;
 
     // Internal CASR-v2 bridge. Weak generalized modes remain in the active 6K
     // control-point space instead of being folded into a 6DoF outer product.
