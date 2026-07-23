@@ -124,6 +124,15 @@ namespace cocolic
     is_evo_viral_ = node["is_evo_viral"].as<bool>();
     CreateCacheFolder(config_path, msg_manager_->bag_path_);
 
+    ct_lidar_observability_ = std::make_shared<CtLidarObservability>(
+        node["ct_degeneracy"], trajectory_, cache_path_);
+    if (ct_lidar_observability_->Enabled() && lidar_iter_ < 2)
+    {
+      std::cerr << "[CT-LiDAR] lidar_iter must be at least 2 for the "
+                   "warm-start/final-linearization diagnostic sequence. "
+                   "The analyzer will remain inactive.\n";
+    }
+
     // gaussian-lic
     if_3dgs_ = node["if_3dgs"].as<bool>();
     lidar_skip_ = node["lidar_skip"].as<int>();
@@ -346,6 +355,28 @@ namespace cocolic
     for (int iter = 0; iter < lidar_iter_; ++iter)
     {
       lidar_handler_->GetLoamFeatureAssociation();
+
+      // The first LIC iteration provides a stable linearization point. The
+      // read-only CT diagnostic is evaluated on the complete re-associated
+      // LiDAR candidate pool immediately before the final LIC solve. It is
+      // intentionally upstream of any future quality/information selection.
+      if (ct_lidar_observability_ &&
+          ct_lidar_observability_->Enabled() &&
+          lidar_iter_ >= 2 && iter == lidar_iter_ - 1)
+      {
+        int64_t reference_time_ns =
+            process_image ? msg.image_timestamp : msg.lidar_max_timestamp;
+        if (!trajectory_->knts.empty())
+        {
+          reference_time_ns =
+              std::min(reference_time_ns, trajectory_->knts.back() - 1);
+        }
+        ct_lidar_observability_->Analyze(
+            msg.lidar_timestamp, reference_time_ns,
+            lidar_handler_->GetPointCorrespondence(),
+            trajectory_manager_->opt_min_t_ns,
+            trajectory_manager_->opt_max_t_ns, use_lidar_scale_);
+      }
 
       if (process_image)
       {

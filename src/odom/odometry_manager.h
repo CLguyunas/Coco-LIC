@@ -27,6 +27,7 @@
 #include <imu/imu_state_estimator.h>
 #include <imu/imu_initializer.h>
 #include <lidar/lidar_handler.h>
+#include <degeneracy/ct_lidar_observability.h>
 
 #include <condition_variable>
 #include <mutex>
@@ -144,6 +145,8 @@ namespace cocolic
     LidarHandler::Ptr lidar_handler_;
 
     R3LIVE::Ptr camera_handler_;
+
+    CtLidarObservability::Ptr ct_lidar_observability_;
 
     int64_t t_begin_add_cam_; // 
 
