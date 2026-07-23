@@ -27,6 +27,7 @@
 #include <imu/imu_state_estimator.h>
 #include <imu/imu_initializer.h>
 #include <lidar/lidar_handler.h>
+#include <degeneracy/observability_analyzer.h>
 
 #include <condition_variable>
 #include <mutex>
@@ -142,6 +143,8 @@ namespace cocolic
     TrajectoryManager::Ptr trajectory_manager_;
 
     LidarHandler::Ptr lidar_handler_;
+
+    ObservabilityAnalyzer::Ptr observability_analyzer_;
 
     R3LIVE::Ptr camera_handler_;
 

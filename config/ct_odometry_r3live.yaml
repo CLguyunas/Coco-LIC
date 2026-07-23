@@ -37,6 +37,40 @@ accelerometer_noise_density: 2.425376259e-02
 accelerometer_random_walk: 1.96e-06         
 
 
+### DSO-DetectOnly ###
+# LiDAR 6DoF observability diagnostics. The detector, support injector, CASR
+# router, and scheduler are read-only. The separate casr_intervention block
+# below is the only opt-in estimator write path. Implementation constants,
+# logging controls, safety limits, and derived scheduler anchors are fixed in
+# src/degeneracy/dso_fixed_config.h and cannot be overridden by YAML.
+dso_detect_only:
+    enabled: true
+    # Method hyperparameters: keep fixed across compared sequences. The exit
+    # value is also reused by the CASR environment router and scheduler.
+    enter_relative_eigenvalue_threshold: 3.0e-3
+    exit_relative_eigenvalue_threshold: 6.0e-3
+    support_enter_quality_threshold: 2.0e-2
+    support_exit_quality_threshold: 5.0e-2
+
+    # Knot-space CASR method hyperparameters. Shadow recovery and its temporal
+    # scheduler are automatically enabled whenever DSO-DetectOnly is enabled.
+    casr_shadow:
+        principal_cosine_threshold: 7.0e-1
+        projector_similarity_threshold: 8.0e-1
+
+    # Experiment mode switches plus the only estimator-strength parameter.
+    # The route selects a fixed cause-specific mechanism automatically:
+    # environment=IMU/prior propagation reference;
+    # support=non-uniform spline increment continuity;
+    # coupled=common-subspace dual-source consensus.
+    # Keep apply_to_estimator=false for dry-run audit; set it true only for an
+    # armed run. The validated starting gain is 0.01.
+    casr_intervention:
+        enabled: true
+        apply_to_estimator: false
+        curvature_gain: 1.0e-2
+
+
 ### EvalutaionParams ###
 is_evo_viral: false
 

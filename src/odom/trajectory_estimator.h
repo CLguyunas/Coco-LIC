@@ -20,6 +20,7 @@
 
 #include <ceres/ceres.h>
 #include <ceres/covariance.h>
+#include <degeneracy/casr_intervention.h>
 #include <odom/factor/ceres_local_param.h>
 #include <imu/imu_state_estimator.h>
 #include <lidar/lidar_feature.h>
@@ -34,6 +35,7 @@
 #include <odom/factor/analytic_diff/image_feature_factor.h>
 #include <odom/factor/analytic_diff/lidar_feature_factor.h>
 #include <odom/factor/analytic_diff/marginalization_factor.h>
+#include <odom/factor/analytic_diff/casr_subspace_factor.h>
 #include <odom/factor/analytic_diff/trajectory_value_factor.h>
 
 namespace cocolic
@@ -268,6 +270,37 @@ namespace cocolic
     void AddMarginalizationFactor(
         MarginalizationInfo::Ptr &last_marginalization_info,
         std::vector<double *> &last_marginalization_parameter_blocks);
+
+    ceres::ResidualBlockId AddCasrCauseDrivenIntervention(
+        CasrRecoveryMechanism recovery_mechanism,
+        int control_point_start_index,
+        const Eigen::MatrixXd &recovery_basis,
+        const Eigen::MatrixXd &affine_nullspace_projector,
+        const Eigen::aligned_vector<SO3d> &reference_rotations,
+        const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
+        double characteristic_range,
+        const Eigen::VectorXd &sqrt_information_weights);
+
+    bool EvaluateCasrProjectedCurvature(
+        int control_point_start_index,
+        double characteristic_range,
+        const Eigen::MatrixXd &recovery_basis,
+        CasrCurvatureEstimate &estimate) const;
+
+    struct ParameterBlockSnapshot
+    {
+      double *data = nullptr;
+      std::vector<double> values;
+    };
+
+    using ParameterSnapshot = std::vector<ParameterBlockSnapshot>;
+
+    ParameterSnapshot CaptureParameterSnapshot() const;
+
+    bool RestoreParameterSnapshot(
+        const ParameterSnapshot &snapshot) const;
+
+    bool RemoveResidualBlock(ceres::ResidualBlockId residual_block_id);
 
     void AddPoseMeasurementAutoDiff(const PoseData &pose_data, double pos_weight,
                                     double rot_weight);

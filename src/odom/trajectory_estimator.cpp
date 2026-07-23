@@ -19,15 +19,21 @@
 
 #include <ceres/ceres.h>
 #include <ceres/covariance.h>
+#include <ceres/crs_matrix.h>
 #include <ceres/dynamic_cost_function.h>
 
 #include <odom/trajectory_estimator.h>
 #include <utils/ceres_callbacks.h>
 
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <memory>
 #include <thread>
+#include <utility>
 #include <variant>
+
+#include <Eigen/Eigenvalues>
 
 namespace cocolic
 {
@@ -171,6 +177,325 @@ namespace cocolic
       residual_summary_.AddResidualInfo(RType_Prior, marginalization_factor,
                                         last_marginalization_parameter_blocks);
     }
+  }
+
+  ceres::ResidualBlockId TrajectoryEstimator::AddCasrCauseDrivenIntervention(
+      CasrRecoveryMechanism recovery_mechanism,
+      int control_point_start_index,
+      const Eigen::MatrixXd &recovery_basis,
+      const Eigen::MatrixXd &affine_nullspace_projector,
+      const Eigen::aligned_vector<SO3d> &reference_rotations,
+      const Eigen::aligned_vector<Eigen::Vector3d> &reference_positions,
+      double characteristic_range,
+      const Eigen::VectorXd &sqrt_information_weights)
+  {
+    const int control_point_num =
+        static_cast<int>(reference_rotations.size());
+    if (control_point_start_index < 0 || control_point_num <= 0 ||
+        static_cast<int>(reference_positions.size()) != control_point_num ||
+        recovery_basis.rows() != 6 * control_point_num ||
+        recovery_basis.cols() <= 0 ||
+        control_point_start_index + control_point_num >
+            static_cast<int>(trajectory_->numKnots()))
+    {
+      return nullptr;
+    }
+
+    analytic_derivative::CasrSubspaceFactor *cost_function = nullptr;
+    switch (recovery_mechanism)
+    {
+    case CasrRecoveryMechanism::PropagationReference:
+      cost_function =
+          new analytic_derivative::CasrPropagationReferenceFactor(
+              recovery_basis, reference_rotations, reference_positions,
+              characteristic_range, sqrt_information_weights);
+      break;
+    case CasrRecoveryMechanism::SplineIncrementContinuity:
+      cost_function =
+          new analytic_derivative::CasrSplineContinuityFactor(
+              recovery_basis, affine_nullspace_projector,
+              reference_rotations, reference_positions,
+              characteristic_range, sqrt_information_weights);
+      break;
+    case CasrRecoveryMechanism::CoupledSourceConsensus:
+      cost_function =
+          new analytic_derivative::CasrCoupledConsensusFactor(
+              recovery_basis, affine_nullspace_projector,
+              reference_rotations, reference_positions,
+              characteristic_range, sqrt_information_weights);
+      break;
+    case CasrRecoveryMechanism::None:
+    default:
+      return nullptr;
+    }
+    if (!cost_function->IsValid())
+    {
+      delete cost_function;
+      return nullptr;
+    }
+
+    std::vector<double *> parameter_blocks;
+    parameter_blocks.reserve(static_cast<size_t>(2 * control_point_num));
+    for (int i = 0; i < control_point_num; ++i)
+    {
+      const size_t knot_index = static_cast<size_t>(
+          control_point_start_index + i);
+      double *rotation = trajectory_->getKnotSO3(knot_index).data();
+      parameter_blocks.emplace_back(rotation);
+      problem_->AddParameterBlock(rotation, 4,
+                                  analytic_local_parameterization_);
+      if (options.lock_traj ||
+          (fixed_control_point_index_ >= 0 &&
+           knot_index <= static_cast<size_t>(fixed_control_point_index_)))
+      {
+        problem_->SetParameterBlockConstant(rotation);
+      }
+    }
+    for (int i = 0; i < control_point_num; ++i)
+    {
+      const size_t knot_index = static_cast<size_t>(
+          control_point_start_index + i);
+      double *position = trajectory_->getKnotPos(knot_index).data();
+      parameter_blocks.emplace_back(position);
+      problem_->AddParameterBlock(position, 3);
+      if (options.lock_tran || options.lock_traj ||
+          (fixed_control_point_index_ >= 0 &&
+           knot_index <= static_cast<size_t>(fixed_control_point_index_)))
+      {
+        problem_->SetParameterBlockConstant(position);
+      }
+    }
+
+    return problem_->AddResidualBlock(
+        cost_function, nullptr, parameter_blocks);
+  }
+
+  bool TrajectoryEstimator::EvaluateCasrProjectedCurvature(
+      int control_point_start_index,
+      double characteristic_range,
+      const Eigen::MatrixXd &recovery_basis,
+      CasrCurvatureEstimate &estimate) const
+  {
+    estimate = CasrCurvatureEstimate();
+    if (control_point_start_index < 0 ||
+        !std::isfinite(characteristic_range) ||
+        characteristic_range <= 0.0 || recovery_basis.rows() <= 0 ||
+        recovery_basis.rows() % 6 != 0 || recovery_basis.cols() <= 0 ||
+        !recovery_basis.allFinite())
+    {
+      return false;
+    }
+    const int control_point_num = recovery_basis.rows() / 6;
+    const int tangent_dimension = 6 * control_point_num;
+    if (control_point_start_index + control_point_num >
+        static_cast<int>(trajectory_->numKnots()))
+    {
+      return false;
+    }
+
+    ceres::Problem::EvaluateOptions options;
+    options.apply_loss_function = true;
+    options.parameter_blocks.reserve(
+        static_cast<size_t>(2 * control_point_num));
+    for (int i = 0; i < control_point_num; ++i)
+    {
+      double *rotation = trajectory_->getKnotSO3(
+          static_cast<size_t>(control_point_start_index + i)).data();
+      if (!problem_->HasParameterBlock(rotation) ||
+          problem_->IsParameterBlockConstant(rotation))
+      {
+        return false;
+      }
+      options.parameter_blocks.emplace_back(rotation);
+    }
+    for (int i = 0; i < control_point_num; ++i)
+    {
+      double *position = trajectory_->getKnotPos(
+          static_cast<size_t>(control_point_start_index + i)).data();
+      if (!problem_->HasParameterBlock(position) ||
+          problem_->IsParameterBlockConstant(position))
+      {
+        return false;
+      }
+      options.parameter_blocks.emplace_back(position);
+    }
+
+    ceres::CRSMatrix sparse_jacobian;
+    double cost = 0.0;
+    if (!problem_->Evaluate(options, &cost, nullptr, nullptr,
+                            &sparse_jacobian) ||
+        !std::isfinite(cost) ||
+        sparse_jacobian.num_cols != tangent_dimension)
+    {
+      return false;
+    }
+    if (static_cast<int>(sparse_jacobian.rows.size()) !=
+            sparse_jacobian.num_rows + 1 ||
+        sparse_jacobian.cols.size() != sparse_jacobian.values.size())
+    {
+      return false;
+    }
+
+    // Ceres columns are grouped [dtheta_0..K, dp_0..K]. Convert the Hessian
+    // to the metric [r*dtheta, dp] used by CASR. Accumulating J^T J directly
+    // from CRS avoids materializing a potentially very large dense Jacobian.
+    Eigen::VectorXd tangent_scale = Eigen::VectorXd::Ones(
+        tangent_dimension);
+    tangent_scale.head(3 * control_point_num).setConstant(
+        1.0 / characteristic_range);
+    Eigen::MatrixXd scaled_hessian = Eigen::MatrixXd::Zero(
+        tangent_dimension, tangent_dimension);
+    for (int row = 0; row < sparse_jacobian.num_rows; ++row)
+    {
+      const int row_begin =
+          sparse_jacobian.rows[static_cast<size_t>(row)];
+      const int row_end =
+          sparse_jacobian.rows[static_cast<size_t>(row + 1)];
+      if (row_begin < 0 || row_end < row_begin ||
+          row_end > static_cast<int>(sparse_jacobian.values.size()))
+      {
+        return false;
+      }
+      for (int lhs_index = row_begin; lhs_index < row_end; ++lhs_index)
+      {
+        const int lhs_column =
+            sparse_jacobian.cols[static_cast<size_t>(lhs_index)];
+        const double lhs_value =
+            sparse_jacobian.values[static_cast<size_t>(lhs_index)];
+        if (lhs_column < 0 || lhs_column >= tangent_dimension ||
+            !std::isfinite(lhs_value))
+        {
+          return false;
+        }
+        const double scaled_lhs = lhs_value * tangent_scale[lhs_column];
+        for (int rhs_index = row_begin; rhs_index < row_end; ++rhs_index)
+        {
+          const int rhs_column =
+              sparse_jacobian.cols[static_cast<size_t>(rhs_index)];
+          const double rhs_value =
+              sparse_jacobian.values[static_cast<size_t>(rhs_index)];
+          if (rhs_column < 0 || rhs_column >= tangent_dimension ||
+              !std::isfinite(rhs_value))
+          {
+            return false;
+          }
+          scaled_hessian(lhs_column, rhs_column) +=
+              scaled_lhs * rhs_value * tangent_scale[rhs_column];
+        }
+      }
+    }
+    if (!scaled_hessian.allFinite())
+    {
+      return false;
+    }
+
+    // CASR basis rows are interleaved [r*dtheta_0, dp_0, ...].
+    Eigen::MatrixXd grouped_basis = Eigen::MatrixXd::Zero(
+        tangent_dimension, recovery_basis.cols());
+    for (int i = 0; i < control_point_num; ++i)
+    {
+      grouped_basis.block(3 * i, 0, 3, recovery_basis.cols()) =
+          recovery_basis.block(6 * i, 0, 3, recovery_basis.cols());
+      grouped_basis.block(3 * control_point_num + 3 * i, 0, 3,
+                          recovery_basis.cols()) =
+          recovery_basis.block(6 * i + 3, 0, 3,
+                               recovery_basis.cols());
+    }
+    const Eigen::MatrixXd projected_hessian =
+        grouped_basis.transpose() * scaled_hessian * grouped_basis;
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> projected_solver(
+        projected_hessian);
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> reference_solver(
+        scaled_hessian);
+    if (projected_solver.info() != Eigen::Success ||
+        reference_solver.info() != Eigen::Success ||
+        !projected_solver.eigenvalues().allFinite() ||
+        !projected_solver.eigenvectors().allFinite() ||
+        !reference_solver.eigenvalues().allFinite())
+    {
+      return false;
+    }
+
+    const Eigen::VectorXd reference_curvatures =
+        reference_solver.eigenvalues().cwiseMax(0.0);
+    const int reference_middle = reference_curvatures.size() / 2;
+    const double reference_median =
+        reference_curvatures.size() % 2 == 0
+            ? 0.5 * (reference_curvatures[reference_middle - 1] +
+                     reference_curvatures[reference_middle])
+            : reference_curvatures[reference_middle];
+
+    estimate.valid = true;
+    estimate.tangent_dimension = tangent_dimension;
+    estimate.reference_curvature_min = reference_curvatures.minCoeff();
+    estimate.reference_curvature_median = reference_median;
+    estimate.reference_curvature_mean = reference_curvatures.mean();
+    estimate.reference_curvature_max = reference_curvatures.maxCoeff();
+    estimate.recovery_curvatures =
+        projected_solver.eigenvalues().cwiseMax(0.0);
+    estimate.recovery_eigenvectors = projected_solver.eigenvectors();
+    return true;
+  }
+
+  TrajectoryEstimator::ParameterSnapshot
+  TrajectoryEstimator::CaptureParameterSnapshot() const
+  {
+    ParameterSnapshot snapshot;
+    std::vector<double *> parameter_blocks;
+    problem_->GetParameterBlocks(&parameter_blocks);
+    snapshot.reserve(parameter_blocks.size());
+    for (double *parameter_block : parameter_blocks)
+    {
+      const int size = problem_->ParameterBlockSize(parameter_block);
+      if (!parameter_block || size <= 0)
+      {
+        continue;
+      }
+      ParameterBlockSnapshot block;
+      block.data = parameter_block;
+      block.values.assign(parameter_block, parameter_block + size);
+      snapshot.emplace_back(std::move(block));
+    }
+    return snapshot;
+  }
+
+  bool TrajectoryEstimator::RestoreParameterSnapshot(
+      const ParameterSnapshot &snapshot) const
+  {
+    for (const ParameterBlockSnapshot &block : snapshot)
+    {
+      if (!block.data || block.values.empty() ||
+          !problem_->HasParameterBlock(block.data) ||
+          problem_->ParameterBlockSize(block.data) !=
+              static_cast<int>(block.values.size()))
+      {
+        return false;
+      }
+    }
+    for (const ParameterBlockSnapshot &block : snapshot)
+    {
+      std::copy(block.values.begin(), block.values.end(), block.data);
+    }
+    trajectory_->UpdateExtrinsics();
+    return true;
+  }
+
+  bool TrajectoryEstimator::RemoveResidualBlock(
+      ceres::ResidualBlockId residual_block_id)
+  {
+    if (!residual_block_id)
+    {
+      return false;
+    }
+    std::vector<ceres::ResidualBlockId> residual_blocks;
+    problem_->GetResidualBlocks(&residual_blocks);
+    if (std::find(residual_blocks.begin(), residual_blocks.end(),
+                  residual_block_id) == residual_blocks.end())
+    {
+      return false;
+    }
+    problem_->RemoveResidualBlock(residual_block_id);
+    return true;
   }
 
   void TrajectoryEstimator::AddIMUMeasurementAnalyticNURBS(

@@ -121,6 +121,10 @@ add_executable(odometry_node
    src/odom/trajectory_manager.cpp
    src/odom/trajectory_estimator.cpp
    src/odom/odometry_manager.cpp
+   src/degeneracy/casr_intervention.cpp
+   src/degeneracy/casr_shadow.cpp
+   src/degeneracy/observability_analyzer.cpp
+   src/degeneracy/support_degradation_injector.cpp
    src/odom/factor/analytic_diff/marginalization_factor.cpp
    src/utils/parameter_struct.cpp
 )
@@ -132,3 +136,21 @@ target_link_libraries(odometry_node
    ${thirdparty_libraries}
   #  fmt::fmt
 )
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(casr_shadow_test
+    test/casr_shadow_test.cpp
+    src/degeneracy/casr_shadow.cpp
+  )
+  if(TARGET casr_shadow_test)
+    target_link_libraries(casr_shadow_test ${catkin_LIBRARIES})
+  endif()
+
+  catkin_add_gtest(casr_intervention_test
+    test/casr_intervention_test.cpp
+    src/degeneracy/casr_intervention.cpp
+  )
+  if(TARGET casr_intervention_test)
+    target_link_libraries(casr_intervention_test ${thirdparty_libraries})
+  endif()
+endif()

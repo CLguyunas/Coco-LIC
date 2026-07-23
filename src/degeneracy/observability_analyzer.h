@@ -1,0 +1,275 @@
+/*
+ * Coco-LIC: Continuous-Time Tightly-Coupled LiDAR-Inertial-Camera Odometry using Non-Uniform B-spline
+ *
+ * Detector-only extension: this file observes LiDAR geometry but never changes
+ * the estimator, map, marginalization prior, or trajectory control points.
+ */
+
+#pragma once
+
+#include <degeneracy/casr_intervention.h>
+#include <degeneracy/casr_shadow.h>
+#include <degeneracy/degeneracy_hysteresis.h>
+#include <degeneracy/support_degradation_injector.h>
+
+#include <Eigen/Core>
+#include <lidar/lidar_feature.h>
+#include <spline/trajectory.h>
+#include <yaml-cpp/yaml.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <fstream>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace cocolic
+{
+
+  struct ObservabilityResult
+  {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    bool valid = false;
+    int64_t scan_timestamp_ns = 0;
+    size_t correspondence_num = 0;
+    size_t plane_num = 0;
+    size_t line_num = 0;
+    double characteristic_range = 1.0;
+    double condition_number = 0.0;
+    // Legacy hard-threshold count retained as a raw diagnostic.
+    int weak_direction_num = 6;
+    // Candidate count and temporal state use the hysteresis enter threshold.
+    int candidate_weak_direction_num = 0;
+    double degeneracy_score = 0.0;
+    bool degenerate_state = false;
+    int enter_counter = 0;
+    int exit_counter = 0;
+
+    // Exact non-uniform B-spline support diagnostic. The support matrix is
+    // built from the same four-knot SO(3) analytic Jacobians and R3 basis
+    // coefficients used by LoamFeatureFactorNURBS, but without any geometry
+    // residual. Its generalized eigenvalues compare the timestamp support in
+    // the current scan with ideal uniform sampling of the same active knot
+    // intervals.
+    bool support_valid = false;
+    int support_control_point_num = 0;
+    int support_interval_num = 0;
+    int support_dimension = 0;
+    int support_effective_rank = 0;
+    int support_weak_direction_num = 0;
+    double support_time_span_s = 0.0;
+    double support_min_knot_dt_s = 0.0;
+    double support_max_knot_dt_s = 0.0;
+    double support_quality_min = 0.0;
+    double support_condition_number = 0.0;
+    double support_score = 0.0;
+    bool support_degenerate_state = false;
+    int support_enter_counter = 0;
+    int support_exit_counter = 0;
+    int support_weakest_knot_index = -1;
+    double support_weakest_knot_energy_ratio = 0.0;
+    double support_weakest_rotation_ratio = 0.0;
+    double support_boundary_energy_ratio = 0.0;
+
+    // Interpretable timestamp-distribution audit. These fields describe the
+    // accepted real LiDAR correspondences that actually entered the support
+    // matrix, using the same within-interval cells as the fixed reference.
+    size_t support_sample_num = 0;
+    int support_empty_interval_num = 0;
+    int support_min_interval_sample_num = 0;
+    int support_max_interval_sample_num = 0;
+    int support_temporal_bin_num = 0;
+    int support_occupied_temporal_bin_num = 0;
+    double support_occupied_temporal_bin_ratio = 0.0;
+    double support_temporal_mass_total_variation = 0.0;
+
+    // Internal CASR-v2 bridge. Weak generalized modes remain in the active 6K
+    // control-point space instead of being folded into a 6DoF outer product.
+    // The reference matrices define the scan-wide least-squares lift from a
+    // map-frame LiDAR pose direction to the same scaled knot coordinates.
+    // These dynamic fields are kept out of the legacy observability CSV.
+    int support_control_point_start_index = -1;
+    int support_knot_mode_num = 0;
+    Eigen::MatrixXd support_knot_weak_basis;
+    Eigen::MatrixXd support_reference_pose_information;
+    Eigen::MatrixXd support_reference_pose_cross;
+    Eigen::MatrixXd support_representative_pose_mapping;
+
+    // -1 invalid, 0 healthy, 1 environment geometry, 2 spline support,
+    // 3 coupled environment-and-support degeneracy. This is diagnostic only.
+    int degeneracy_cause = -1;
+
+    // Ascending order. The state order is [rotation, translation] in the map
+    // frame. Rotation columns are normalized by characteristic_range before
+    // decomposition.
+    Eigen::Matrix<double, 6, 1> eigenvalues =
+        Eigen::Matrix<double, 6, 1>::Zero();
+    Eigen::Matrix<double, 6, 1> relative_eigenvalues =
+        Eigen::Matrix<double, 6, 1>::Zero();
+    Eigen::Matrix<double, 6, 6> eigenvectors =
+        Eigen::Matrix<double, 6, 6>::Identity();
+  };
+
+  struct SupportInjectionDiagnostic
+  {
+    SupportInjectionMetadata metadata;
+    ObservabilityResult injected_support;
+
+    // Combines the real environment state with the injected support state.
+    // It is written only to the injection CSV and never replaces the real
+    // degeneracy_cause used by the main diagnostic stream.
+    int degeneracy_cause = -1;
+  };
+
+  class ObservabilityAnalyzer
+  {
+  public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    typedef std::shared_ptr<ObservabilityAnalyzer> Ptr;
+
+    ObservabilityAnalyzer(const YAML::Node &node,
+                          Trajectory::Ptr trajectory,
+                          const std::string &output_prefix);
+
+    ~ObservabilityAnalyzer();
+
+    bool Enabled() const { return enabled_; }
+
+    ObservabilityResult AnalyzeAndLog(
+        int64_t scan_timestamp_ns,
+        const Eigen::aligned_vector<PointCorrespondence> &point_corrs);
+
+    const ObservabilityResult &LastResult() const { return last_result_; }
+
+    const SupportInjectionDiagnostic &LastInjectionResult() const
+    {
+      return last_injection_result_;
+    }
+
+    const CasrShadowResult &LastCasrResult() const
+    {
+      return last_casr_result_;
+    }
+
+    const CasrShadowResult &LastInjectedCasrResult() const
+    {
+      return last_injected_casr_result_;
+    }
+
+    const CasrInterventionConfig &InterventionConfig() const
+    {
+      return casr_intervention_config_;
+    }
+
+    void LogCasrIntervention(const CasrInterventionReport &report);
+
+  private:
+    ObservabilityResult Analyze(
+        int64_t scan_timestamp_ns,
+        const Eigen::aligned_vector<PointCorrespondence> &point_corrs,
+        std::vector<WeightedTimestamp> *weighted_timestamps) const;
+
+    double ComputeCharacteristicRange(
+        const Eigen::aligned_vector<PointCorrespondence> &point_corrs) const;
+
+    bool BuildPoseJacobian(const PointCorrespondence &pc,
+                           double characteristic_range,
+                           Eigen::Matrix<double, 1, 6> &jacobian) const;
+
+    void AnalyzeSplineSupport(
+        const std::vector<WeightedTimestamp> &weighted_timestamps,
+        ObservabilityResult &result) const;
+
+    void AnalyzeInjectedSupport(
+        const std::vector<WeightedTimestamp> &weighted_timestamps,
+        const ObservabilityResult &original_result);
+
+    CasrShadowResult AnalyzeCasr(
+        const ObservabilityResult &environment_result,
+        const ObservabilityResult &support_result,
+        CasrTemporalState *temporal_state,
+        CasrDataSource data_source) const;
+
+    void WriteCsvHeader();
+    void WriteCsvRow(const ObservabilityResult &result);
+    void WriteInjectionCsvHeader();
+    void WriteInjectionCsvRow(
+        int64_t scan_timestamp_ns,
+        const ObservabilityResult &original_result,
+        const SupportInjectionDiagnostic &injection_result);
+    void WriteCasrCsvHeader();
+    void WriteCasrCsvRow(
+        int64_t scan_timestamp_ns,
+        const ObservabilityResult &original_result,
+        const CasrShadowResult &real_result,
+        const CasrShadowResult *injected_result);
+    void WriteInterventionCsvHeader();
+    void PrintSummary(const ObservabilityResult &result) const;
+
+  private:
+    Trajectory::Ptr trajectory_;
+
+    bool enabled_ = false;
+    bool output_csv_ = dso_fixed::kOutputCsv;
+    bool use_correspondence_scale_ = dso_fixed::kUseCorrespondenceScale;
+    int min_correspondences_ = dso_fixed::kMinCorrespondences;
+    int analyze_every_n_scans_ = dso_fixed::kAnalyzeEveryNScans;
+    int print_every_n_scans_ = dso_fixed::kPrintEveryNScans;
+    double relative_eigenvalue_threshold_ =
+        dso_fixed::kLegacyRelativeEigenvalueThreshold;
+    double enter_relative_eigenvalue_threshold_ = 3e-3;
+    double exit_relative_eigenvalue_threshold_ = 6e-3;
+    int enter_consecutive_scans_ =
+        dso_fixed::kDetectorEnterConsecutiveScans;
+    int exit_consecutive_scans_ =
+        dso_fixed::kDetectorExitConsecutiveScans;
+    double min_characteristic_range_ =
+        dso_fixed::kMinCharacteristicRange;
+    double max_characteristic_range_ =
+        dso_fixed::kMaxCharacteristicRange;
+
+    bool support_enabled_ = dso_fixed::kSupportEnabled;
+    int support_reference_samples_per_interval_ =
+        dso_fixed::kSupportReferenceSamplesPerInterval;
+    int support_max_control_points_ = dso_fixed::kSupportMaxControlPoints;
+    double support_enter_quality_threshold_ = 2e-2;
+    double support_exit_quality_threshold_ = 5e-2;
+    int support_enter_consecutive_scans_ =
+        dso_fixed::kSupportEnterConsecutiveScans;
+    int support_exit_consecutive_scans_ =
+        dso_fixed::kSupportExitConsecutiveScans;
+
+    bool support_injection_enabled_ = false;
+    bool support_injection_output_csv_ = dso_fixed::kInjectionOutputCsv;
+    SupportDegradationInjector support_injector_;
+
+    bool casr_shadow_enabled_ = false;
+    bool casr_shadow_output_csv_ = dso_fixed::kCasrShadowOutputCsv;
+    CasrShadowEvaluator casr_shadow_evaluator_;
+    CasrTemporalState real_casr_temporal_state_;
+    CasrTemporalState injected_casr_temporal_state_;
+
+    CasrInterventionConfig casr_intervention_config_;
+
+    size_t scan_counter_ = 0;
+    std::string csv_path_;
+    std::ofstream csv_stream_;
+    std::string injection_csv_path_;
+    std::ofstream injection_csv_stream_;
+    std::string casr_csv_path_;
+    std::ofstream casr_csv_stream_;
+    std::string intervention_csv_path_;
+    std::ofstream intervention_csv_stream_;
+    DegeneracyHysteresis degeneracy_hysteresis_;
+    DegeneracyHysteresis support_hysteresis_;
+    DegeneracyHysteresis injected_support_hysteresis_;
+    ObservabilityResult last_result_;
+    SupportInjectionDiagnostic last_injection_result_;
+    CasrShadowResult last_casr_result_;
+    CasrShadowResult last_injected_casr_result_;
+  };
+
+} // namespace cocolic
