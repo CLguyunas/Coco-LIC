@@ -20,7 +20,7 @@ namespace cocolic
 {
 
   inline constexpr char kCasrInterventionMethodVersion[] =
-      "cause_differential_recovery_v3";
+      "cause_differential_recovery_v3_support_audit";
 
   enum class CasrRecoveryMechanism : int
   {
@@ -113,6 +113,9 @@ namespace cocolic
   {
     bool valid = false;
     int tangent_dimension = 0;
+    double reference_curvature_min = 0.0;
+    double reference_curvature_median = 0.0;
+    double reference_curvature_mean = 0.0;
     double reference_curvature_max = 0.0;
     Eigen::VectorXd recovery_curvatures;
     // Columns rotate the original orthonormal recovery basis into the
@@ -222,6 +225,22 @@ namespace cocolic
     double added_information_min = 0.0;
     double added_information_median = 0.0;
     double added_information_max = 0.0;
+
+    // Independent read-only audit of the timestamp-support basis against the
+    // actual final-LIC Hessian. It is evaluated even when CASR is not routed.
+    bool support_curvature_audit_valid = false;
+    int support_curvature_rank = 0;
+    double support_curvature_reference_min = 0.0;
+    double support_curvature_reference_median = 0.0;
+    double support_curvature_reference_mean = 0.0;
+    double support_curvature_reference_max = 0.0;
+    double support_curvature_projected_min = 0.0;
+    double support_curvature_projected_median = 0.0;
+    double support_curvature_projected_mean = 0.0;
+    double support_curvature_projected_max = 0.0;
+    double support_curvature_min_over_reference_max = 0.0;
+    double support_curvature_mean_over_reference_mean = 0.0;
+    double support_curvature_below_target_fraction = 0.0;
 
     bool continuity_operator_valid = false;
     int continuity_operator_rank = 0;
