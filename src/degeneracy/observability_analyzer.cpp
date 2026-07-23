@@ -857,6 +857,17 @@ namespace cocolic
     Eigen::MatrixXd reference_pose_cross =
         Eigen::MatrixXd::Zero(dimension, 6);
 
+    const int support_interval_num =
+        max_interval_index - min_interval_index + 1;
+    const int temporal_bin_num =
+        support_interval_num * support_reference_samples_per_interval_;
+    std::vector<int> interval_sample_counts(
+        static_cast<size_t>(support_interval_num), 0);
+    std::vector<double> observed_temporal_mass(
+        static_cast<size_t>(temporal_bin_num), 0.0);
+    std::vector<double> reference_temporal_mass(
+        static_cast<size_t>(temporal_bin_num), 0.0);
+
     using SO3View = analytic_derivative::So3SplineView;
     using LocalMapping =
         Eigen::Matrix<double, 6, 6 * SplineOrder>;
@@ -999,6 +1010,18 @@ namespace cocolic
                              nullptr, nullptr))
       {
         observed_weight_sum += sample.squared_weight;
+        const int local_interval =
+            sample.interval_index - min_interval_index;
+        const int local_bin = std::min(
+            support_reference_samples_per_interval_ - 1,
+            std::max(0, static_cast<int>(
+                sample.u * support_reference_samples_per_interval_)));
+        const int temporal_bin =
+            local_interval * support_reference_samples_per_interval_ +
+            local_bin;
+        ++interval_sample_counts[static_cast<size_t>(local_interval)];
+        observed_temporal_mass[static_cast<size_t>(temporal_bin)] +=
+            sample.squared_weight;
       }
     }
 
@@ -1046,6 +1069,12 @@ namespace cocolic
                                &reference_pose_cross))
         {
           reference_weight_sum += reference_sample_weight;
+          const int temporal_bin =
+              (interval_index - min_interval_index) *
+                  support_reference_samples_per_interval_ +
+              sample_index;
+          reference_temporal_mass[static_cast<size_t>(temporal_bin)] +=
+              reference_sample_weight;
         }
       }
     }
@@ -1055,6 +1084,30 @@ namespace cocolic
     {
       return;
     }
+
+    int empty_interval_num = 0;
+    int min_interval_sample_num = std::numeric_limits<int>::max();
+    int max_interval_sample_num = 0;
+    for (const int count : interval_sample_counts)
+    {
+      empty_interval_num += count == 0 ? 1 : 0;
+      min_interval_sample_num = std::min(min_interval_sample_num, count);
+      max_interval_sample_num = std::max(max_interval_sample_num, count);
+    }
+    int occupied_temporal_bin_num = 0;
+    double temporal_mass_l1 = 0.0;
+    for (int bin_index = 0; bin_index < temporal_bin_num; ++bin_index)
+    {
+      const double observed_mass =
+          observed_temporal_mass[static_cast<size_t>(bin_index)] /
+          observed_weight_sum;
+      const double reference_mass =
+          reference_temporal_mass[static_cast<size_t>(bin_index)] /
+          reference_weight_sum;
+      occupied_temporal_bin_num += observed_mass > 0.0 ? 1 : 0;
+      temporal_mass_l1 += std::abs(observed_mass - reference_mass);
+    }
+    temporal_mass_l1 *= 0.5;
 
     observed_information /= observed_weight_sum;
     reference_information /= reference_weight_sum;
@@ -1289,6 +1342,22 @@ namespace cocolic
         std::max(0.0, max_knot_energy);
     result.support_weakest_rotation_ratio = rotation_energy;
     result.support_boundary_energy_ratio = boundary_energy;
+    size_t accepted_sample_num = 0;
+    for (const int count : interval_sample_counts)
+    {
+      accepted_sample_num += static_cast<size_t>(count);
+    }
+    result.support_sample_num = accepted_sample_num;
+    result.support_empty_interval_num = empty_interval_num;
+    result.support_min_interval_sample_num = min_interval_sample_num;
+    result.support_max_interval_sample_num = max_interval_sample_num;
+    result.support_temporal_bin_num = temporal_bin_num;
+    result.support_occupied_temporal_bin_num =
+        occupied_temporal_bin_num;
+    result.support_occupied_temporal_bin_ratio =
+        static_cast<double>(occupied_temporal_bin_num) /
+        static_cast<double>(temporal_bin_num);
+    result.support_temporal_mass_l1 = temporal_mass_l1;
     result.support_control_point_start_index = min_control_index;
     result.support_knot_mode_num = support_knot_mode_num;
     result.support_knot_weak_basis = support_knot_weak_basis;
@@ -1403,7 +1472,14 @@ namespace cocolic
                    "support_exit_counter,support_weakest_knot_index,"
                    "support_weakest_knot_energy_ratio,"
                    "support_weakest_rotation_ratio,"
-                   "support_boundary_energy_ratio,degeneracy_cause";
+                   "support_boundary_energy_ratio,degeneracy_cause,"
+                   "support_sample_num,support_empty_interval_num,"
+                   "support_min_interval_sample_num,"
+                   "support_max_interval_sample_num,"
+                   "support_temporal_bin_num,"
+                   "support_occupied_temporal_bin_num,"
+                   "support_occupied_temporal_bin_ratio,"
+                   "support_temporal_mass_l1";
     csv_stream_ << '\n';
     csv_stream_.flush();
   }
@@ -1460,7 +1536,15 @@ namespace cocolic
                 << result.support_weakest_knot_energy_ratio << ','
                 << result.support_weakest_rotation_ratio << ','
                 << result.support_boundary_energy_ratio << ','
-                << result.degeneracy_cause;
+                << result.degeneracy_cause << ','
+                << result.support_sample_num << ','
+                << result.support_empty_interval_num << ','
+                << result.support_min_interval_sample_num << ','
+                << result.support_max_interval_sample_num << ','
+                << result.support_temporal_bin_num << ','
+                << result.support_occupied_temporal_bin_num << ','
+                << result.support_occupied_temporal_bin_ratio << ','
+                << result.support_temporal_mass_l1;
     csv_stream_ << '\n';
     csv_stream_.flush();
   }
@@ -1690,7 +1774,19 @@ namespace cocolic
            "source_consensus_evaluated,source_consensus_sufficient,"
            "source_consensus_consistent,source_consensus_cosine,"
            "projected_casr_over_counterfactual,"
-           "orthogonal_casr_over_counterfactual\n";
+           "orthogonal_casr_over_counterfactual,"
+           "support_curvature_audit_valid,support_curvature_rank,"
+           "support_curvature_reference_min,"
+           "support_curvature_reference_median,"
+           "support_curvature_reference_mean,"
+           "support_curvature_reference_max,"
+           "support_curvature_projected_min,"
+           "support_curvature_projected_median,"
+           "support_curvature_projected_mean,"
+           "support_curvature_projected_max,"
+           "support_curvature_min_over_reference_max,"
+           "support_curvature_mean_over_reference_mean,"
+           "support_curvature_below_target_fraction\n";
     intervention_csv_stream_.flush();
   }
 
@@ -1781,7 +1877,20 @@ namespace cocolic
         << static_cast<int>(report.source_consensus_consistent) << ','
         << report.source_consensus_cosine << ','
         << report.projected_casr_over_counterfactual << ','
-        << report.orthogonal_casr_over_counterfactual << '\n';
+        << report.orthogonal_casr_over_counterfactual << ','
+        << static_cast<int>(report.support_curvature_audit_valid) << ','
+        << report.support_curvature_rank << ','
+        << report.support_curvature_reference_min << ','
+        << report.support_curvature_reference_median << ','
+        << report.support_curvature_reference_mean << ','
+        << report.support_curvature_reference_max << ','
+        << report.support_curvature_projected_min << ','
+        << report.support_curvature_projected_median << ','
+        << report.support_curvature_projected_mean << ','
+        << report.support_curvature_projected_max << ','
+        << report.support_curvature_min_over_reference_max << ','
+        << report.support_curvature_mean_over_reference_mean << ','
+        << report.support_curvature_below_target_fraction << '\n';
     intervention_csv_stream_.flush();
   }
 
