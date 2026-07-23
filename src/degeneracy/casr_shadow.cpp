@@ -976,6 +976,17 @@ namespace cocolic
         input.support_control_point_start_index;
     result.support_knot_dimension = dimension;
 
+    // Preserve the raw weakest support candidate for an independent audit of
+    // the actual final-LIC Hessian. BuildSupportBasis below remains explicitly
+    // state-gated, so this diagnostic basis cannot change routing or recovery.
+    result.support_audit_knot_basis = OrthonormalBasis(
+        support_knot_weak_basis,
+        config_.support_basis_relative_singular_threshold);
+    if (result.support_audit_knot_basis.cols() <= 0)
+    {
+      return invalid_result();
+    }
+
     const PoseBasis environment_pose_basis =
         BuildEnvironmentPoseBasis(input, config_);
     if (!LiftEnvironmentBasis(input, config_, environment_pose_basis,
