@@ -186,10 +186,10 @@ def audit(label: str, observability_path: Path,
 
     if not support_valid:
         verdict = "NO_VALID_SUPPORT_DIAGNOSTIC"
-    elif not active_runs:
-        verdict = "NO_NATURAL_SUPPORT_TRIGGER"
     elif audit_coverage < 0.90:
         verdict = "INSUFFICIENT_LIC_CURVATURE_COVERAGE"
+    elif not active_runs:
+        verdict = "NO_NATURAL_SUPPORT_TRIGGER"
     elif not active:
         verdict = "TRIGGER_NOT_ALIGNED_WITH_CURVATURE_LOG"
     elif statistics.median(active_below) >= 0.50:
