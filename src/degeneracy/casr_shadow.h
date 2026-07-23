@@ -172,6 +172,11 @@ namespace cocolic
     CasrMatrix6 recovery_projector = CasrMatrix6::Zero();
 
     Eigen::MatrixXd environment_knot_basis;
+    // Ungated weakest timestamp-support candidate retained only for the
+    // independent final-LIC curvature audit. It never enters route selection,
+    // temporal scheduling, or an estimator factor.
+    Eigen::MatrixXd support_audit_knot_basis;
+    // State-gated basis used by CASR routing and recovery.
     Eigen::MatrixXd support_knot_basis;
     Eigen::MatrixXd common_knot_basis;
     Eigen::MatrixXd recovery_knot_basis;
