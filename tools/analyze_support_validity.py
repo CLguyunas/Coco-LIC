@@ -28,7 +28,7 @@ OBS_REQUIRED = {
     "support_sample_num",
     "support_empty_interval_num",
     "support_occupied_temporal_bin_ratio",
-    "support_temporal_mass_l1",
+    "support_temporal_mass_total_variation",
 }
 
 INTERVENTION_REQUIRED = {
@@ -168,7 +168,10 @@ def audit(label: str, observability_path: Path,
         as_float(other, "support_curvature_mean_over_reference_mean")
         for _, other in audited
     ]
-    temporal_l1 = [as_float(row, "support_temporal_mass_l1") for row, _ in audited]
+    temporal_total_variation = [
+        as_float(row, "support_temporal_mass_total_variation")
+        for row, _ in audited
+    ]
     occupied = [
         as_float(row, "support_occupied_temporal_bin_ratio")
         for row, _ in audited
@@ -211,7 +214,8 @@ def audit(label: str, observability_path: Path,
         },
         "curvature_audit_coverage": audit_coverage,
         "all_quality": quantiles(quality),
-        "all_temporal_mass_l1": quantiles(temporal_l1),
+        "all_temporal_mass_total_variation": quantiles(
+            temporal_total_variation),
         "all_occupied_bin_ratio": quantiles(occupied),
         "healthy_min_over_reference_max": quantiles(select(
             healthy, "support_curvature_min_over_reference_max")),
@@ -225,7 +229,8 @@ def audit(label: str, observability_path: Path,
         "spearman": {
             "quality_vs_min_curvature": spearman(quality, curvature_min),
             "quality_vs_mean_curvature": spearman(quality, curvature_mean),
-            "temporal_mass_l1_vs_quality": spearman(temporal_l1, quality),
+            "temporal_total_variation_vs_quality": spearman(
+                temporal_total_variation, quality),
             "occupied_bins_vs_quality": spearman(occupied, quality),
         },
         "verdict": verdict,
