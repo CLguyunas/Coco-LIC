@@ -186,7 +186,19 @@ def audit(label, path):
             q_min = as_float(row, f"{prefix}_q_min")
             q_mean = as_float(row, f"{prefix}_q_mean")
             q_max = as_float(row, f"{prefix}_q_max")
-            if not (q_min > 0.0 and q_min <= q_mean <= q_max):
+            # Aggregate means can lie a few ulps outside an otherwise
+            # constant [min, max] interval after floating-point summation.
+            # Keep the structural check strict at method scale while
+            # tolerating that round-off.
+            q_order_tolerance = 1.0e-12 * max(
+                1.0, abs(q_min), abs(q_mean), abs(q_max)
+            )
+            if not (
+                q_min > 0.0
+                and q_min - q_order_tolerance
+                <= q_mean
+                <= q_max + q_order_tolerance
+            ):
                 structural_errors.append(
                     f"row {index}: invalid {prefix} q ordering"
                 )
