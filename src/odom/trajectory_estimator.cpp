@@ -416,10 +416,21 @@ namespace cocolic
       return false;
     }
 
+    const Eigen::VectorXd reference_curvatures =
+        reference_solver.eigenvalues().cwiseMax(0.0);
+    const int reference_middle = reference_curvatures.size() / 2;
+    const double reference_median =
+        reference_curvatures.size() % 2 == 0
+            ? 0.5 * (reference_curvatures[reference_middle - 1] +
+                     reference_curvatures[reference_middle])
+            : reference_curvatures[reference_middle];
+
     estimate.valid = true;
     estimate.tangent_dimension = tangent_dimension;
-    estimate.reference_curvature_max = std::max(
-        0.0, reference_solver.eigenvalues().maxCoeff());
+    estimate.reference_curvature_min = reference_curvatures.minCoeff();
+    estimate.reference_curvature_median = reference_median;
+    estimate.reference_curvature_mean = reference_curvatures.mean();
+    estimate.reference_curvature_max = reference_curvatures.maxCoeff();
     estimate.recovery_curvatures =
         projected_solver.eigenvalues().cwiseMax(0.0);
     estimate.recovery_eigenvectors = projected_solver.eigenvectors();
