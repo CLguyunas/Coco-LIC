@@ -20,7 +20,7 @@ namespace cocolic
 {
 
   inline constexpr char kCasrInterventionMethodVersion[] =
-      "cause_differential_recovery_v3_support_audit";
+      "cause_differential_recovery_v3_support_audit_v2";
 
   enum class CasrRecoveryMechanism : int
   {
