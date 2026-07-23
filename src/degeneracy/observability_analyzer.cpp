@@ -1095,7 +1095,7 @@ namespace cocolic
       max_interval_sample_num = std::max(max_interval_sample_num, count);
     }
     int occupied_temporal_bin_num = 0;
-    double temporal_mass_l1 = 0.0;
+    double temporal_mass_total_variation = 0.0;
     for (int bin_index = 0; bin_index < temporal_bin_num; ++bin_index)
     {
       const double observed_mass =
@@ -1105,9 +1105,9 @@ namespace cocolic
           reference_temporal_mass[static_cast<size_t>(bin_index)] /
           reference_weight_sum;
       occupied_temporal_bin_num += observed_mass > 0.0 ? 1 : 0;
-      temporal_mass_l1 += std::abs(observed_mass - reference_mass);
+      temporal_mass_total_variation += std::abs(observed_mass - reference_mass);
     }
-    temporal_mass_l1 *= 0.5;
+    temporal_mass_total_variation *= 0.5;
 
     observed_information /= observed_weight_sum;
     reference_information /= reference_weight_sum;
@@ -1357,7 +1357,7 @@ namespace cocolic
     result.support_occupied_temporal_bin_ratio =
         static_cast<double>(occupied_temporal_bin_num) /
         static_cast<double>(temporal_bin_num);
-    result.support_temporal_mass_l1 = temporal_mass_l1;
+    result.support_temporal_mass_total_variation = temporal_mass_total_variation;
     result.support_control_point_start_index = min_control_index;
     result.support_knot_mode_num = support_knot_mode_num;
     result.support_knot_weak_basis = support_knot_weak_basis;
@@ -1479,7 +1479,7 @@ namespace cocolic
                    "support_temporal_bin_num,"
                    "support_occupied_temporal_bin_num,"
                    "support_occupied_temporal_bin_ratio,"
-                   "support_temporal_mass_l1";
+                   "support_temporal_mass_total_variation";
     csv_stream_ << '\n';
     csv_stream_.flush();
   }
@@ -1544,7 +1544,7 @@ namespace cocolic
                 << result.support_temporal_bin_num << ','
                 << result.support_occupied_temporal_bin_num << ','
                 << result.support_occupied_temporal_bin_ratio << ','
-                << result.support_temporal_mass_l1;
+                << result.support_temporal_mass_total_variation;
     csv_stream_ << '\n';
     csv_stream_.flush();
   }
