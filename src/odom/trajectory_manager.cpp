@@ -830,6 +830,78 @@ namespace cocolic
       process_cur_img_ = false;
     }
 
+    // This audit asks the missing scientific question behind the support
+    // detector: does its weakest timestamp-support basis also have low
+    // curvature in the actual final-LIC optimization problem? It is read-only,
+    // uses real measurements only, and runs before any CASR factor is added.
+    if (casr_intervention_config_.enabled && casr_result &&
+        casr_result->data_source == CasrDataSource::RealMeasurements &&
+        casr_result->support_control_point_start_index >= 0 &&
+        casr_result->support_knot_basis.rows() > 0 &&
+        casr_result->support_knot_basis.cols() > 0)
+    {
+      CasrCurvatureEstimate support_curvature;
+      if (estimator->EvaluateCasrProjectedCurvature(
+              casr_result->support_control_point_start_index,
+              casr_characteristic_range,
+              casr_result->support_knot_basis,
+              support_curvature) &&
+          support_curvature.valid &&
+          support_curvature.recovery_curvatures.size() > 0)
+      {
+        const Eigen::VectorXd &projected =
+            support_curvature.recovery_curvatures;
+        const int projected_middle = projected.size() / 2;
+        const double projected_median =
+            projected.size() % 2 == 0
+                ? 0.5 * (projected[projected_middle - 1] +
+                         projected[projected_middle])
+                : projected[projected_middle];
+        const double target =
+            casr_intervention_config_.curvature_target_relative_to_max *
+            support_curvature.reference_curvature_max;
+        int below_target_num = 0;
+        for (int index = 0; index < projected.size(); ++index)
+        {
+          below_target_num += projected[index] < target ? 1 : 0;
+        }
+        last_casr_intervention_report_.support_curvature_audit_valid =
+            true;
+        last_casr_intervention_report_.support_curvature_rank =
+            static_cast<int>(projected.size());
+        last_casr_intervention_report_.support_curvature_reference_min =
+            support_curvature.reference_curvature_min;
+        last_casr_intervention_report_.support_curvature_reference_median =
+            support_curvature.reference_curvature_median;
+        last_casr_intervention_report_.support_curvature_reference_mean =
+            support_curvature.reference_curvature_mean;
+        last_casr_intervention_report_.support_curvature_reference_max =
+            support_curvature.reference_curvature_max;
+        last_casr_intervention_report_.support_curvature_projected_min =
+            projected.minCoeff();
+        last_casr_intervention_report_.support_curvature_projected_median =
+            projected_median;
+        last_casr_intervention_report_.support_curvature_projected_mean =
+            projected.mean();
+        last_casr_intervention_report_.support_curvature_projected_max =
+            projected.maxCoeff();
+        last_casr_intervention_report_
+            .support_curvature_min_over_reference_max =
+                projected.minCoeff() /
+                std::max(casr_intervention_config_.curvature_min_reference,
+                         support_curvature.reference_curvature_max);
+        last_casr_intervention_report_
+            .support_curvature_mean_over_reference_mean =
+                projected.mean() /
+                std::max(casr_intervention_config_.curvature_min_reference,
+                         support_curvature.reference_curvature_mean);
+        last_casr_intervention_report_
+            .support_curvature_below_target_fraction =
+                static_cast<double>(below_target_num) /
+                static_cast<double>(projected.size());
+      }
+    }
+
     CasrInterventionPlan casr_plan;
     Eigen::MatrixXd casr_recovery_basis;
     Eigen::MatrixXd casr_continuity_projector;
