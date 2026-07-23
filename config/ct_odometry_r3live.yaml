@@ -39,6 +39,30 @@ ct_degeneracy:
   output_csv: true
   weak_eigenvalue_ratio: 3.0e-3
 
+# Existing QI observation management, ported without coupling it to the
+# CT detector. Both master switches false reproduce the original path.
+qi_quality_enable: false
+qi_lidar_quality_enable: true
+qi_visual_quality_enable: true
+qi_selection_enable: false
+
+# Residual quality maps to an information multiplier q. LiDAR can now
+# attenuate inconsistent observations as well as mildly enhance clean ones.
+qi_lidar_q_min: 0.5
+qi_lidar_q_max: 1.2
+qi_visual_q_min: 0.7
+qi_visual_q_max: 1.0
+qi_visual_point_quality_weight: 0.25
+
+# D-optimal hard budgets and adaptive stopping conditions.
+qi_max_lidar_obs: 800
+qi_max_visual_obs: 200
+qi_selection_info_ratio: 0.95
+qi_selection_min_gain: 1.0e-6
+qi_info_prior_eps: 1.0e-6
+qi_output_csv: true
+qi_log_enable: false
+
 # imu：BMI088（200Hz）
 # derived from data manual https://terra-1-g.djicdn.com/65c028cd298f4669a7f0e40e50ba1131/demo/avia/Livox%20AVIA%20User%20Manual_CHS.pdf
 gyroscope_noise_density: 3.45557556e-03

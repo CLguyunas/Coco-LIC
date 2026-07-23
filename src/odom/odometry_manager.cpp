@@ -18,6 +18,9 @@
 
 #include <eigen_conversions/eigen_msg.h>
 #include <odom/odometry_manager.h>
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include <numeric>
 
 #include <fstream>
@@ -136,6 +139,111 @@ namespace cocolic
     // gaussian-lic
     if_3dgs_ = node["if_3dgs"].as<bool>();
     lidar_skip_ = node["lidar_skip"].as<int>();
+
+    // QI observation management is opt-in. With both master switches false,
+    // the original Coco-LIC observation path is used byte-for-byte.
+    qi_config_.quality_enable = yaml::GetValue<bool>(
+        node, "qi_quality_enable",
+        yaml::GetValue<bool>(node, "qim_quality_enable", false));
+    qi_config_.lidar_quality_enable = yaml::GetValue<bool>(
+        node, "qi_lidar_quality_enable",
+        yaml::GetValue<bool>(node, "qim_lidar_quality_enable", true));
+    qi_config_.visual_quality_enable = yaml::GetValue<bool>(
+        node, "qi_visual_quality_enable",
+        yaml::GetValue<bool>(node, "qim_visual_quality_enable", true));
+    qi_config_.selection_enable = yaml::GetValue<bool>(
+        node, "qi_selection_enable",
+        yaml::GetValue<bool>(node, "qim_selection_enable", false));
+
+    qi_config_.lidar_q_min = yaml::GetValue<double>(
+        node, "qi_lidar_q_min",
+        yaml::GetValue<double>(node, "qim_lidar_q_min", 0.5));
+    qi_config_.lidar_q_max = yaml::GetValue<double>(
+        node, "qi_lidar_q_max",
+        yaml::GetValue<double>(node, "qim_lidar_q_max", 1.2));
+    qi_config_.visual_q_min = yaml::GetValue<double>(
+        node, "qi_visual_q_min",
+        yaml::GetValue<double>(node, "qim_visual_q_min", 0.7));
+    qi_config_.visual_q_max = yaml::GetValue<double>(
+        node, "qi_visual_q_max",
+        yaml::GetValue<double>(node, "qim_visual_q_max", 1.0));
+    qi_config_.visual_point_quality_weight = yaml::GetValue<double>(
+        node, "qi_visual_point_quality_weight", 0.25);
+
+    qi_config_.max_lidar_obs = yaml::GetValue<int>(
+        node, "qi_max_lidar_obs",
+        yaml::GetValue<int>(node, "qim_max_lidar_obs", 800));
+    qi_config_.max_visual_obs = yaml::GetValue<int>(
+        node, "qi_max_visual_obs",
+        yaml::GetValue<int>(node, "qim_max_visual_obs", 200));
+    qi_config_.selection_info_ratio = yaml::GetValue<double>(
+        node, "qi_selection_info_ratio", 0.95);
+    qi_config_.selection_min_gain = yaml::GetValue<double>(
+        node, "qi_selection_min_gain", 1.0e-6);
+    qi_config_.info_prior_eps = yaml::GetValue<double>(
+        node, "qi_info_prior_eps",
+        yaml::GetValue<double>(node, "qim_info_prior_eps", 1.0e-6));
+    qi_config_.output_csv = yaml::GetValue<bool>(
+        node, "qi_output_csv", true);
+    qi_config_.log_enable = yaml::GetValue<bool>(
+        node, "qi_log_enable",
+        yaml::GetValue<bool>(node, "qim_log_enable", false));
+
+    qi_lidar_weight_ = yaml::GetValue<double>(node, "lidar_weight", 1.0);
+    qi_image_weight_ = yaml::GetValue<double>(node, "image_weight", 1.0);
+
+    qi_config_.lidar_q_min =
+        std::max(qi_config_.lidar_q_min, 1.0e-3);
+    qi_config_.lidar_q_max =
+        std::max(qi_config_.lidar_q_max, qi_config_.lidar_q_min);
+    qi_config_.visual_q_min =
+        std::max(qi_config_.visual_q_min, 1.0e-3);
+    qi_config_.visual_q_max =
+        std::max(qi_config_.visual_q_max, qi_config_.visual_q_min);
+    qi_config_.visual_point_quality_weight = QiClamp(
+        qi_config_.visual_point_quality_weight, 0.0, 1.0);
+    qi_config_.selection_info_ratio = QiClamp(
+        qi_config_.selection_info_ratio, 0.0, 1.0);
+    qi_config_.selection_min_gain =
+        std::max(qi_config_.selection_min_gain, 0.0);
+    qi_config_.info_prior_eps =
+        std::max(qi_config_.info_prior_eps, 1.0e-12);
+    qi_config_.max_lidar_obs = std::max(qi_config_.max_lidar_obs, 1);
+    qi_config_.max_visual_obs = std::max(qi_config_.max_visual_obs, 1);
+
+    const bool qi_enabled =
+        qi_config_.quality_enable || qi_config_.selection_enable;
+    if (qi_enabled && qi_config_.output_csv)
+    {
+      qi_csv_.open(cache_path_ + "_qi_observation.csv",
+                   std::ios::out | std::ios::trunc);
+      if (qi_csv_.is_open())
+      {
+        qi_csv_
+            << "scan_time_ns,image_time_ns,process_image,"
+               "optimization_success,quality_enabled,selection_enabled,"
+               "characteristic_length,"
+               "lidar_candidates,lidar_selected,lidar_q_min,lidar_q_mean,"
+               "lidar_q_max,lidar_weight_ratio_min,lidar_weight_ratio_mean,"
+               "lidar_weight_ratio_max,lidar_info_coverage,"
+               "lidar_condition_number,lidar_pre_median,lidar_pre_mad,"
+               "lidar_post_median,lidar_post_mad,lidar_sigma,"
+               "visual_candidates,visual_selected,visual_q_min,"
+               "visual_q_mean,visual_q_max,visual_weight_ratio_min,"
+               "visual_weight_ratio_mean,visual_weight_ratio_max,"
+               "visual_info_coverage,visual_condition_number,"
+               "visual_pre_median,visual_pre_mad,visual_post_median,"
+               "visual_post_mad,visual_sigma,pnp_inliers,"
+               "pnp_over_fmat,fmat_over_track\n";
+        qi_csv_ << std::setprecision(17);
+      }
+      else
+      {
+        std::cerr << "[QI] Cannot open audit CSV: "
+                  << cache_path_ + "_qi_observation.csv" << "\n";
+      }
+    }
+
     lidarpoints.clear();
 
     std::cout << std::fixed << std::setprecision(4);
@@ -157,6 +265,872 @@ namespace cocolic
     cache_path_ = cache_path_parent_ + "/data/" + bag_name_;
     // boost::filesystem::create_directory(cache_path_);
     return true;
+  }
+
+  double OdometryManager::QiClamp(double value, double low,
+                                  double high) const
+  {
+    return std::max(low, std::min(high, value));
+  }
+
+  double OdometryManager::QiMedian(std::vector<double> values) const
+  {
+    if (values.empty())
+      return 0.0;
+    const size_t mid = values.size() / 2;
+    std::nth_element(values.begin(), values.begin() + mid, values.end());
+    const double upper = values[mid];
+    if (values.size() % 2 != 0)
+      return upper;
+    std::nth_element(values.begin(), values.begin() + mid - 1,
+                     values.end());
+    return 0.5 * (values[mid - 1] + upper);
+  }
+
+  QiResidualScale OdometryManager::QiMadScale(
+      const std::deque<double> &values) const
+  {
+    QiResidualScale scale;
+    if (values.size() < 5)
+      return scale;
+
+    // The stored residuals are non-negative magnitudes. For a zero-centred
+    // Gaussian residual, median(|r|) / 0.67449 is a robust sigma estimate.
+    // This avoids the near-zero scale produced by taking a MAD around a
+    // non-zero residual magnitude distribution.
+    const double median_abs =
+        QiMedian(std::vector<double>(values.begin(), values.end()));
+    scale.sigma = std::max(median_abs / 0.6744897501960817, 1.0e-6);
+    scale.ready = true;
+    return scale;
+  }
+
+  double OdometryManager::ComputeLidarResidual(
+      const PointCorrespondence &corr, const SE3d &T_lidar) const
+  {
+    const Eigen::Vector3d point_map = T_lidar * corr.point;
+    if (corr.geo_type == Plane)
+    {
+      return point_map.dot(corr.geo_plane.head<3>()) +
+             corr.geo_plane[3];
+    }
+    return ((point_map - corr.geo_point).cross(corr.geo_normal)).norm();
+  }
+
+  double OdometryManager::ComputeVisualResidual(
+      const QiVisualObs &obs, const SE3d &T_cam) const
+  {
+    const Eigen::Vector3d point_cam = T_cam.inverse() * obs.point;
+    if (point_cam.z() <= 1.0e-6)
+      return 1.0e3;
+    const Eigen::Vector2d uv(
+        K_(0, 0) * point_cam.x() / point_cam.z() + K_(0, 2),
+        K_(1, 1) * point_cam.y() / point_cam.z() + K_(1, 2));
+    return (obs.pixel - uv).norm();
+  }
+
+  Eigen::Matrix<double, 6, 6> OdometryManager::ComputeLidarInfo(
+      const PointCorrespondence &corr, const SE3d &T_lidar,
+      double final_weight) const
+  {
+    Eigen::Matrix<double, 6, 6> info =
+        Eigen::Matrix<double, 6, 6>::Zero();
+    const Eigen::Vector3d point_map = T_lidar * corr.point;
+
+    // This is the scalar residual row used by LoamFeatureFactorNURBS,
+    // expressed against a left perturbation of the instantaneous LiDAR pose.
+    // In particular, a line correspondence contributes one scalar distance
+    // row, not the rank-two vector projection used by the earlier prototype.
+    Eigen::Matrix<double, 1, 3> residual_wrt_point;
+    if (corr.geo_type == Plane)
+    {
+      residual_wrt_point = corr.geo_plane.head<3>().transpose();
+    }
+    else
+    {
+      const Eigen::Vector3d distance_vector =
+          (point_map - corr.geo_point).cross(corr.geo_normal);
+      const double distance = distance_vector.norm();
+      if (distance <= 1.0e-9)
+        return info;
+      residual_wrt_point =
+          -distance_vector.transpose() / distance *
+          SO3d::hat(corr.geo_normal);
+    }
+
+    Eigen::Matrix<double, 3, 6> point_wrt_pose;
+    point_wrt_pose.block<3, 3>(0, 0) = -SO3d::hat(point_map);
+    point_wrt_pose.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity();
+    Eigen::Matrix<double, 1, 6> jacobian =
+        residual_wrt_point * point_wrt_pose;
+
+    // Use one common six-DoF metric for LiDAR and visual information.
+    // The scaled rotation coordinate is characteristic_length * delta_theta.
+    jacobian.block<1, 3>(0, 0) /=
+        std::max(qi_characteristic_length_, 1.0e-6);
+    jacobian *= final_weight;
+    info.noalias() = jacobian.transpose() * jacobian;
+    return info;
+  }
+
+  Eigen::Matrix<double, 6, 6> OdometryManager::ComputeVisualInfo(
+      const QiVisualObs &obs, const SE3d &T_cam,
+      double final_weight) const
+  {
+    Eigen::Matrix<double, 6, 6> info =
+        Eigen::Matrix<double, 6, 6>::Zero();
+    const Eigen::Vector3d point_cam = T_cam.inverse() * obs.point;
+    if (point_cam.z() <= 1.0e-6)
+      return info;
+
+    const double x = point_cam.x();
+    const double y = point_cam.y();
+    const double z = point_cam.z();
+    Eigen::Matrix<double, 2, 3> projection_jacobian;
+    projection_jacobian
+        << K_(0, 0) / z, 0.0, -K_(0, 0) * x / (z * z),
+           0.0, K_(1, 1) / z, -K_(1, 1) * y / (z * z);
+
+    Eigen::Matrix<double, 3, 6> point_wrt_pose;
+    point_wrt_pose.block<3, 3>(0, 0) = -SO3d::hat(point_cam);
+    point_wrt_pose.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity();
+    Eigen::Matrix<double, 2, 6> jacobian =
+        -projection_jacobian * point_wrt_pose;
+    jacobian.block<2, 3>(0, 0) /=
+        std::max(qi_characteristic_length_, 1.0e-6);
+    jacobian *= final_weight;
+    info.noalias() = jacobian.transpose() * jacobian;
+    return info;
+  }
+
+  double OdometryManager::QiLogDet(
+      const Eigen::Matrix<double, 6, 6> &mat) const
+  {
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> solver(
+        0.5 * (mat + mat.transpose()));
+    if (solver.info() != Eigen::Success)
+      return -1.0e30;
+    double logdet = 0.0;
+    for (int i = 0; i < 6; ++i)
+      logdet += std::log(std::max(solver.eigenvalues()[i], 1.0e-12));
+    return logdet;
+  }
+
+  double OdometryManager::QiConditionNumber(
+      const Eigen::Matrix<double, 6, 6> &mat) const
+  {
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> solver(
+        0.5 * (mat + mat.transpose()));
+    if (solver.info() != Eigen::Success)
+      return 0.0;
+    const double min_eigenvalue =
+        std::max(solver.eigenvalues()[0], 1.0e-12);
+    const double max_eigenvalue =
+        std::max(solver.eigenvalues()[5], 1.0e-12);
+    return max_eigenvalue / min_eigenvalue;
+  }
+
+  void OdometryManager::BuildVisualObs()
+  {
+    qi_visual_obs_.clear();
+    v_points_.clear();
+    px_obss_.clear();
+    auto &tracked =
+        camera_handler_->op_track.m_map_rgb_pts_in_last_frame_pos;
+    for (auto it = tracked.begin(); it != tracked.end(); ++it)
+    {
+      RGB_pts *rgb_point = static_cast<RGB_pts *>(it->first);
+      if (!rgb_point)
+        continue;
+      QiVisualObs obs;
+      obs.point_ptr = rgb_point;
+      obs.point_id = rgb_point->m_pt_index;
+      obs.point = Eigen::Vector3d(rgb_point->get_pos()(0, 0),
+                                  rgb_point->get_pos()(1, 0),
+                                  rgb_point->get_pos()(2, 0));
+      obs.pixel = Eigen::Vector2d(it->second.x, it->second.y);
+      qi_visual_obs_.push_back(obs);
+      v_points_.push_back(obs.point);
+      px_obss_.push_back(obs.pixel);
+    }
+  }
+
+  void OdometryManager::PrepareQiVisualObs(int64_t image_timestamp)
+  {
+    qi_selected_visual_obs_.clear();
+    qi_selected_visual_points_.clear();
+    qi_selected_visual_pixels_.clear();
+    qi_selected_visual_weights_.clear();
+    qi_last_visual_candidates_ =
+        static_cast<int>(qi_visual_obs_.size());
+    qi_last_visual_selected_ = qi_last_visual_candidates_;
+    if (qi_visual_obs_.empty())
+    {
+      qi_last_visual_q_min_ = 1.0;
+      qi_last_visual_q_mean_ = 1.0;
+      qi_last_visual_q_max_ = 1.0;
+      qi_last_visual_weight_ratio_min_ = 1.0;
+      qi_last_visual_weight_ratio_mean_ = 1.0;
+      qi_last_visual_weight_ratio_max_ = 1.0;
+      qi_last_visual_logdet_ = 0.0;
+      qi_last_visual_gain_mean_ = 0.0;
+      qi_last_visual_cond_ = 0.0;
+      qi_last_visual_info_coverage_ = 0.0;
+      qi_last_visual_pre_median_ = 0.0;
+      qi_last_visual_pre_mad_ = 0.0;
+      qi_last_visual_post_median_ = 0.0;
+      qi_last_visual_post_mad_ = 0.0;
+      qi_last_n_pnp_ = 0;
+      qi_last_eta_pnp_ = 0.0;
+      qi_last_eta_fmat_ = 0.0;
+      return;
+    }
+
+    const int tracked_count =
+        std::max(camera_handler_->op_track.inlier_aft_track, 1);
+    const int fundamental_inliers =
+        std::max(camera_handler_->op_track.inlier_aft_fmat, 0);
+    const int pnp_inliers =
+        std::max(camera_handler_->op_track.inlier_aft_pnp, 0);
+    qi_last_n_pnp_ = pnp_inliers;
+    qi_last_eta_fmat_ = QiClamp(
+        static_cast<double>(fundamental_inliers) / tracked_count,
+        0.0, 1.0);
+    qi_last_eta_pnp_ = QiClamp(
+        fundamental_inliers > 0
+            ? static_cast<double>(pnp_inliers) / fundamental_inliers
+            : 0.0,
+        0.0, 1.0);
+
+    if (image_timestamp != qi_last_visual_history_timestamp_)
+    {
+      qi_recent_n_pnp_.push_back(static_cast<double>(pnp_inliers));
+      while (qi_recent_n_pnp_.size() > 20)
+        qi_recent_n_pnp_.pop_front();
+      qi_last_visual_history_timestamp_ = image_timestamp;
+    }
+    qi_n0_ = std::max(
+        QiMedian(std::vector<double>(qi_recent_n_pnp_.begin(),
+                                     qi_recent_n_pnp_.end())),
+        1.0);
+
+    const SE3d T_cam = trajectory_->GetCameraPoseNURBS(image_timestamp);
+    std::vector<double> pre_residuals;
+    pre_residuals.reserve(qi_visual_obs_.size());
+    for (const auto &obs : qi_visual_obs_)
+      pre_residuals.push_back(ComputeVisualResidual(obs, T_cam));
+
+    qi_last_visual_pre_median_ = QiMedian(pre_residuals);
+    std::vector<double> pre_deviations;
+    pre_deviations.reserve(pre_residuals.size());
+    for (double residual : pre_residuals)
+    {
+      pre_deviations.push_back(
+          std::abs(residual - qi_last_visual_pre_median_));
+    }
+    qi_last_visual_pre_mad_ = QiMedian(pre_deviations);
+
+    const double count_quality =
+        QiClamp(static_cast<double>(pnp_inliers) / qi_n0_, 0.0, 1.0);
+    const double frame_quality = std::cbrt(QiClamp(
+        count_quality * qi_last_eta_pnp_ * qi_last_eta_fmat_,
+        0.0, 1.0));
+
+    double q_min = std::numeric_limits<double>::max();
+    double q_max = -std::numeric_limits<double>::max();
+    double q_sum = 0.0;
+    for (size_t index = 0; index < qi_visual_obs_.size(); ++index)
+    {
+      auto &obs = qi_visual_obs_[index];
+      obs.selected = false;
+      obs.info_gain = 0.0;
+      obs.residual_pre = pre_residuals[index];
+      obs.frame_quality = frame_quality;
+      if (qi_visual_scale_.ready)
+      {
+        const double normalized =
+            obs.residual_pre / qi_visual_scale_.sigma;
+        obs.point_quality = std::exp(-0.5 * normalized * normalized);
+      }
+      else
+      {
+        obs.point_quality = 1.0;
+      }
+      const double point_mix =
+          (1.0 - qi_config_.visual_point_quality_weight) +
+          qi_config_.visual_point_quality_weight * obs.point_quality;
+      const double raw_quality =
+          QiClamp(frame_quality * point_mix, 0.0, 1.0);
+      obs.q =
+          (qi_config_.quality_enable &&
+           qi_config_.visual_quality_enable)
+              ? qi_config_.visual_q_min +
+                    (qi_config_.visual_q_max -
+                     qi_config_.visual_q_min) *
+                        raw_quality
+              : 1.0;
+      obs.base_weight = qi_image_weight_;
+      obs.final_weight = obs.base_weight * std::sqrt(obs.q);
+      obs.info = ComputeVisualInfo(obs, T_cam, obs.final_weight);
+      q_min = std::min(q_min, obs.q);
+      q_max = std::max(q_max, obs.q);
+      q_sum += obs.q;
+    }
+
+    qi_last_visual_q_min_ = q_min;
+    qi_last_visual_q_max_ = q_max;
+    qi_last_visual_q_mean_ = q_sum / qi_visual_obs_.size();
+    SelectQiVisualObs();
+  }
+
+  void OdometryManager::PrepareQiLidarObs(
+      const Eigen::aligned_vector<PointCorrespondence> &point_corrs)
+  {
+    qi_lidar_obs_.clear();
+    qi_selected_lidar_obs_.clear();
+    qi_selected_point_corrs_.clear();
+    qi_selected_lidar_weights_.clear();
+    qi_last_lidar_candidates_ = static_cast<int>(point_corrs.size());
+    qi_last_lidar_selected_ = qi_last_lidar_candidates_;
+    if (point_corrs.empty())
+    {
+      qi_last_lidar_q_min_ = 1.0;
+      qi_last_lidar_q_mean_ = 1.0;
+      qi_last_lidar_q_max_ = 1.0;
+      qi_last_lidar_weight_ratio_min_ = 1.0;
+      qi_last_lidar_weight_ratio_mean_ = 1.0;
+      qi_last_lidar_weight_ratio_max_ = 1.0;
+      qi_last_lidar_logdet_ = 0.0;
+      qi_last_lidar_gain_mean_ = 0.0;
+      qi_last_lidar_cond_ = 0.0;
+      qi_last_lidar_info_coverage_ = 0.0;
+      qi_last_lidar_pre_median_ = 0.0;
+      qi_last_lidar_pre_mad_ = 0.0;
+      qi_last_lidar_post_median_ = 0.0;
+      qi_last_lidar_post_mad_ = 0.0;
+      return;
+    }
+
+    // The same scan-level characteristic length is used for both modalities,
+    // so D-optimal gains do not mix radians and metres inconsistently.
+    std::vector<double> ranges;
+    ranges.reserve(point_corrs.size());
+    for (const auto &corr : point_corrs)
+    {
+      if (std::isfinite(corr.point.norm()))
+        ranges.push_back(corr.point.norm());
+    }
+    qi_characteristic_length_ = ranges.empty()
+        ? 1.0
+        : QiClamp(QiMedian(ranges), 1.0, 100.0);
+
+    std::vector<double> pre_residuals;
+    pre_residuals.reserve(point_corrs.size());
+    double q_min = std::numeric_limits<double>::max();
+    double q_max = -std::numeric_limits<double>::max();
+    double q_sum = 0.0;
+
+    for (const auto &corr : point_corrs)
+    {
+      QiLidarObs obs;
+      obs.correspondence = corr;
+      const SE3d T_lidar =
+          trajectory_->GetLidarPoseNURBS(corr.t_point);
+      obs.residual_pre =
+          std::abs(ComputeLidarResidual(corr, T_lidar));
+
+      if (qi_config_.quality_enable &&
+          qi_config_.lidar_quality_enable &&
+          qi_lidar_scale_.ready)
+      {
+        const double normalized =
+            obs.residual_pre / qi_lidar_scale_.sigma;
+        const double residual_quality =
+            std::exp(-0.5 * normalized * normalized);
+        obs.q = qi_config_.lidar_q_min +
+            (qi_config_.lidar_q_max - qi_config_.lidar_q_min) *
+                QiClamp(residual_quality, 0.0, 1.0);
+      }
+      else
+      {
+        obs.q = 1.0;
+      }
+
+      obs.base_weight = qi_lidar_weight_;
+      if (use_lidar_scale_)
+        obs.base_weight *= corr.scale;
+      obs.final_weight = obs.base_weight * std::sqrt(obs.q);
+      obs.info = ComputeLidarInfo(corr, T_lidar, obs.final_weight);
+
+      pre_residuals.push_back(obs.residual_pre);
+      q_min = std::min(q_min, obs.q);
+      q_max = std::max(q_max, obs.q);
+      q_sum += obs.q;
+      qi_lidar_obs_.push_back(obs);
+    }
+
+    qi_last_lidar_q_min_ = q_min;
+    qi_last_lidar_q_max_ = q_max;
+    qi_last_lidar_q_mean_ = q_sum / qi_lidar_obs_.size();
+    qi_last_lidar_pre_median_ = QiMedian(pre_residuals);
+    std::vector<double> pre_deviations;
+    pre_deviations.reserve(pre_residuals.size());
+    for (double residual : pre_residuals)
+    {
+      pre_deviations.push_back(
+          std::abs(residual - qi_last_lidar_pre_median_));
+    }
+    qi_last_lidar_pre_mad_ = QiMedian(pre_deviations);
+    SelectQiLidarObs();
+  }
+
+  void OdometryManager::SelectQiLidarObs()
+  {
+    qi_selected_lidar_obs_.clear();
+    qi_selected_point_corrs_.clear();
+    qi_selected_lidar_weights_.clear();
+    if (qi_lidar_obs_.empty())
+      return;
+
+    const int budget = std::min(
+        qi_config_.max_lidar_obs,
+        static_cast<int>(qi_lidar_obs_.size()));
+    const Eigen::Matrix<double, 6, 6> lambda0 =
+        qi_config_.info_prior_eps *
+        Eigen::Matrix<double, 6, 6>::Identity();
+    Eigen::Matrix<double, 6, 6> lambda = lambda0;
+    Eigen::Matrix<double, 6, 6> lambda_full = lambda0;
+    for (const auto &obs : qi_lidar_obs_)
+      lambda_full += obs.info;
+    const double base_logdet = QiLogDet(lambda0);
+    const double full_gain =
+        std::max(QiLogDet(lambda_full) - base_logdet, 1.0e-12);
+
+    double gain_sum = 0.0;
+    if (!qi_config_.selection_enable)
+    {
+      for (auto &obs : qi_lidar_obs_)
+      {
+        obs.selected = true;
+        lambda += obs.info;
+        qi_selected_lidar_obs_.push_back(obs);
+      }
+    }
+    else
+    {
+      std::vector<char> used(qi_lidar_obs_.size(), 0);
+      for (int selected_count = 0;
+           selected_count < budget; ++selected_count)
+      {
+        const double current_logdet = QiLogDet(lambda);
+        double best_gain = -1.0e30;
+        int best_index = -1;
+        for (size_t index = 0; index < qi_lidar_obs_.size(); ++index)
+        {
+          if (used[index])
+            continue;
+          const double gain =
+              QiLogDet(lambda + qi_lidar_obs_[index].info) -
+              current_logdet;
+          if (gain > best_gain)
+          {
+            best_gain = gain;
+            best_index = static_cast<int>(index);
+          }
+        }
+        if (best_index < 0)
+          break;
+        if (selected_count >= 6 &&
+            best_gain < qi_config_.selection_min_gain)
+          break;
+
+        used[best_index] = 1;
+        qi_lidar_obs_[best_index].selected = true;
+        qi_lidar_obs_[best_index].info_gain = best_gain;
+        lambda += qi_lidar_obs_[best_index].info;
+        gain_sum += best_gain;
+        qi_selected_lidar_obs_.push_back(
+            qi_lidar_obs_[best_index]);
+
+        const double coverage = QiClamp(
+            (QiLogDet(lambda) - base_logdet) / full_gain, 0.0, 1.0);
+        if (selected_count + 1 >= 6 &&
+            coverage >= qi_config_.selection_info_ratio)
+          break;
+      }
+    }
+
+    double scale_min = std::numeric_limits<double>::max();
+    double scale_max = -std::numeric_limits<double>::max();
+    double scale_sum = 0.0;
+    double base_min = std::numeric_limits<double>::max();
+    double base_max = -std::numeric_limits<double>::max();
+    double base_sum = 0.0;
+    double ratio_min = std::numeric_limits<double>::max();
+    double ratio_max = -std::numeric_limits<double>::max();
+    double ratio_sum = 0.0;
+
+    for (const auto &obs : qi_selected_lidar_obs_)
+    {
+      qi_selected_point_corrs_.push_back(obs.correspondence);
+      qi_selected_lidar_weights_.push_back(obs.final_weight);
+      const double ratio = obs.base_weight > 1.0e-12
+          ? obs.final_weight / obs.base_weight
+          : 1.0;
+      const double scale = obs.correspondence.scale;
+      scale_min = std::min(scale_min, scale);
+      scale_max = std::max(scale_max, scale);
+      scale_sum += scale;
+      base_min = std::min(base_min, obs.base_weight);
+      base_max = std::max(base_max, obs.base_weight);
+      base_sum += obs.base_weight;
+      ratio_min = std::min(ratio_min, ratio);
+      ratio_max = std::max(ratio_max, ratio);
+      ratio_sum += ratio;
+    }
+
+    const int selected =
+        static_cast<int>(qi_selected_lidar_obs_.size());
+    qi_last_lidar_selected_ = selected;
+    qi_last_lidar_scale_min_ = selected > 0 ? scale_min : 1.0;
+    qi_last_lidar_scale_mean_ =
+        selected > 0 ? scale_sum / selected : 1.0;
+    qi_last_lidar_scale_max_ = selected > 0 ? scale_max : 1.0;
+    qi_last_lidar_base_weight_min_ =
+        selected > 0 ? base_min : qi_lidar_weight_;
+    qi_last_lidar_base_weight_mean_ =
+        selected > 0 ? base_sum / selected : qi_lidar_weight_;
+    qi_last_lidar_base_weight_max_ =
+        selected > 0 ? base_max : qi_lidar_weight_;
+    qi_last_lidar_weight_ratio_min_ =
+        selected > 0 ? ratio_min : 1.0;
+    qi_last_lidar_weight_ratio_mean_ =
+        selected > 0 ? ratio_sum / selected : 1.0;
+    qi_last_lidar_weight_ratio_max_ =
+        selected > 0 ? ratio_max : 1.0;
+    qi_last_lidar_logdet_ = QiLogDet(lambda);
+    qi_last_lidar_cond_ = QiConditionNumber(lambda);
+    qi_last_lidar_gain_mean_ =
+        selected > 0 ? gain_sum / selected : 0.0;
+    qi_last_lidar_info_coverage_ = QiClamp(
+        (QiLogDet(lambda) - base_logdet) / full_gain, 0.0, 1.0);
+  }
+
+  void OdometryManager::SelectQiVisualObs()
+  {
+    qi_selected_visual_obs_.clear();
+    qi_selected_visual_points_.clear();
+    qi_selected_visual_pixels_.clear();
+    qi_selected_visual_weights_.clear();
+    if (qi_visual_obs_.empty())
+      return;
+
+    const int budget = std::min(
+        qi_config_.max_visual_obs,
+        static_cast<int>(qi_visual_obs_.size()));
+    const Eigen::Matrix<double, 6, 6> lambda0 =
+        qi_config_.info_prior_eps *
+        Eigen::Matrix<double, 6, 6>::Identity();
+    Eigen::Matrix<double, 6, 6> lambda = lambda0;
+    Eigen::Matrix<double, 6, 6> lambda_full = lambda0;
+    for (const auto &obs : qi_visual_obs_)
+      lambda_full += obs.info;
+    const double base_logdet = QiLogDet(lambda0);
+    const double full_gain =
+        std::max(QiLogDet(lambda_full) - base_logdet, 1.0e-12);
+
+    double gain_sum = 0.0;
+    if (!qi_config_.selection_enable)
+    {
+      for (auto &obs : qi_visual_obs_)
+      {
+        obs.selected = true;
+        lambda += obs.info;
+        qi_selected_visual_obs_.push_back(obs);
+      }
+    }
+    else
+    {
+      std::vector<char> used(qi_visual_obs_.size(), 0);
+      for (int selected_count = 0;
+           selected_count < budget; ++selected_count)
+      {
+        const double current_logdet = QiLogDet(lambda);
+        double best_gain = -1.0e30;
+        int best_index = -1;
+        for (size_t index = 0; index < qi_visual_obs_.size(); ++index)
+        {
+          if (used[index])
+            continue;
+          const double gain =
+              QiLogDet(lambda + qi_visual_obs_[index].info) -
+              current_logdet;
+          if (gain > best_gain)
+          {
+            best_gain = gain;
+            best_index = static_cast<int>(index);
+          }
+        }
+        if (best_index < 0)
+          break;
+        if (selected_count >= 6 &&
+            best_gain < qi_config_.selection_min_gain)
+          break;
+
+        used[best_index] = 1;
+        qi_visual_obs_[best_index].selected = true;
+        qi_visual_obs_[best_index].info_gain = best_gain;
+        lambda += qi_visual_obs_[best_index].info;
+        gain_sum += best_gain;
+        qi_selected_visual_obs_.push_back(
+            qi_visual_obs_[best_index]);
+
+        const double coverage = QiClamp(
+            (QiLogDet(lambda) - base_logdet) / full_gain, 0.0, 1.0);
+        if (selected_count + 1 >= 6 &&
+            coverage >= qi_config_.selection_info_ratio)
+          break;
+      }
+    }
+
+    double ratio_min = std::numeric_limits<double>::max();
+    double ratio_max = -std::numeric_limits<double>::max();
+    double ratio_sum = 0.0;
+    for (const auto &obs : qi_selected_visual_obs_)
+    {
+      qi_selected_visual_points_.push_back(obs.point);
+      qi_selected_visual_pixels_.push_back(obs.pixel);
+      qi_selected_visual_weights_.push_back(obs.final_weight);
+      const double ratio = obs.base_weight > 1.0e-12
+          ? obs.final_weight / obs.base_weight
+          : 1.0;
+      ratio_min = std::min(ratio_min, ratio);
+      ratio_max = std::max(ratio_max, ratio);
+      ratio_sum += ratio;
+    }
+
+    const int selected =
+        static_cast<int>(qi_selected_visual_obs_.size());
+    qi_last_visual_selected_ = selected;
+    qi_last_visual_weight_ratio_min_ =
+        selected > 0 ? ratio_min : 1.0;
+    qi_last_visual_weight_ratio_mean_ =
+        selected > 0 ? ratio_sum / selected : 1.0;
+    qi_last_visual_weight_ratio_max_ =
+        selected > 0 ? ratio_max : 1.0;
+    qi_last_visual_logdet_ = QiLogDet(lambda);
+    qi_last_visual_cond_ = QiConditionNumber(lambda);
+    qi_last_visual_gain_mean_ =
+        selected > 0 ? gain_sum / selected : 0.0;
+    qi_last_visual_info_coverage_ = QiClamp(
+        (QiLogDet(lambda) - base_logdet) / full_gain, 0.0, 1.0);
+  }
+
+  void OdometryManager::UpdateQiResidualStatistics(
+      int64_t image_timestamp, bool process_image,
+      bool optimization_success)
+  {
+    if (!optimization_success)
+    {
+      qi_last_lidar_post_median_ =
+          std::numeric_limits<double>::quiet_NaN();
+      qi_last_lidar_post_mad_ =
+          std::numeric_limits<double>::quiet_NaN();
+      if (process_image)
+      {
+        qi_last_visual_post_median_ =
+            std::numeric_limits<double>::quiet_NaN();
+        qi_last_visual_post_mad_ =
+            std::numeric_limits<double>::quiet_NaN();
+      }
+      return;
+    }
+
+    // Update the robust scales from every candidate, not only from the
+    // D-optimal subset. Selection therefore cannot make its own future
+    // quality distribution appear artificially clean.
+    std::vector<double> lidar_post;
+    lidar_post.reserve(qi_lidar_obs_.size());
+    for (auto &obs : qi_lidar_obs_)
+    {
+      const SE3d T_lidar = trajectory_->GetLidarPoseNURBS(
+          obs.correspondence.t_point);
+      obs.residual_post = std::abs(ComputeLidarResidual(
+          obs.correspondence, T_lidar));
+      qi_recent_lidar_residuals_.push_back(obs.residual_post);
+      lidar_post.push_back(obs.residual_post);
+    }
+    while (qi_recent_lidar_residuals_.size() > 5000)
+      qi_recent_lidar_residuals_.pop_front();
+    if (!lidar_post.empty())
+    {
+      qi_last_lidar_post_median_ = QiMedian(lidar_post);
+      std::vector<double> deviations;
+      deviations.reserve(lidar_post.size());
+      for (double residual : lidar_post)
+      {
+        deviations.push_back(
+            std::abs(residual - qi_last_lidar_post_median_));
+      }
+      qi_last_lidar_post_mad_ = QiMedian(deviations);
+    }
+
+    if (process_image)
+    {
+      const SE3d T_cam =
+          trajectory_->GetCameraPoseNURBS(image_timestamp);
+      std::vector<double> visual_post;
+      visual_post.reserve(qi_visual_obs_.size());
+      for (auto &obs : qi_visual_obs_)
+      {
+        obs.residual_post = ComputeVisualResidual(obs, T_cam);
+        qi_recent_visual_residuals_.push_back(obs.residual_post);
+        visual_post.push_back(obs.residual_post);
+      }
+      while (qi_recent_visual_residuals_.size() > 2000)
+        qi_recent_visual_residuals_.pop_front();
+      if (!visual_post.empty())
+      {
+        qi_last_visual_post_median_ = QiMedian(visual_post);
+        std::vector<double> deviations;
+        deviations.reserve(visual_post.size());
+        for (double residual : visual_post)
+        {
+          deviations.push_back(
+              std::abs(residual - qi_last_visual_post_median_));
+        }
+        qi_last_visual_post_mad_ = QiMedian(deviations);
+      }
+    }
+
+    qi_lidar_scale_ = QiMadScale(qi_recent_lidar_residuals_);
+    qi_visual_scale_ = QiMadScale(qi_recent_visual_residuals_);
+  }
+
+  void OdometryManager::LogQiSummary() const
+  {
+    if (!qi_config_.log_enable)
+      return;
+    const bool lidar_quality_active =
+        qi_config_.quality_enable &&
+        qi_config_.lidar_quality_enable;
+    const bool visual_quality_active =
+        qi_config_.quality_enable &&
+        qi_config_.visual_quality_enable;
+
+    std::cout << GREEN << "[QI] LiDAR cand/sel "
+              << qi_last_lidar_candidates_ << "/"
+              << qi_last_lidar_selected_
+              << " char_len " << qi_characteristic_length_
+              << " scale[min/mean/max] "
+              << qi_last_lidar_scale_min_ << "/"
+              << qi_last_lidar_scale_mean_ << "/"
+              << qi_last_lidar_scale_max_
+              << " base_w[min/mean/max] "
+              << qi_last_lidar_base_weight_min_ << "/"
+              << qi_last_lidar_base_weight_mean_ << "/"
+              << qi_last_lidar_base_weight_max_
+              << " q[min/mean/max] "
+              << qi_last_lidar_q_min_ << "/"
+              << qi_last_lidar_q_mean_ << "/"
+              << qi_last_lidar_q_max_
+              << " final/base[min/mean/max] "
+              << qi_last_lidar_weight_ratio_min_ << "/"
+              << qi_last_lidar_weight_ratio_mean_ << "/"
+              << qi_last_lidar_weight_ratio_max_
+              << " sigma " << qi_lidar_scale_.sigma
+              << " ready " << qi_lidar_scale_.ready
+              << " quality " << lidar_quality_active
+              << " pre med/mad " << qi_last_lidar_pre_median_ << "/"
+              << qi_last_lidar_pre_mad_
+              << " post med/mad " << qi_last_lidar_post_median_ << "/"
+              << qi_last_lidar_post_mad_
+              << " logdet/gain/cond/coverage "
+              << qi_last_lidar_logdet_ << "/"
+              << qi_last_lidar_gain_mean_ << "/"
+              << qi_last_lidar_cond_ << "/"
+              << qi_last_lidar_info_coverage_
+              << RESET << std::endl;
+
+    std::cout << GREEN << "[QI] Visual cand/sel "
+              << qi_last_visual_candidates_ << "/"
+              << qi_last_visual_selected_
+              << " N/eta_pnp/eta_fmat "
+              << qi_last_n_pnp_ << "/"
+              << qi_last_eta_pnp_ << "/"
+              << qi_last_eta_fmat_
+              << " q[min/mean/max] "
+              << qi_last_visual_q_min_ << "/"
+              << qi_last_visual_q_mean_ << "/"
+              << qi_last_visual_q_max_
+              << " final/image[min/mean/max] "
+              << qi_last_visual_weight_ratio_min_ << "/"
+              << qi_last_visual_weight_ratio_mean_ << "/"
+              << qi_last_visual_weight_ratio_max_
+              << " sigma " << qi_visual_scale_.sigma
+              << " ready " << qi_visual_scale_.ready
+              << " quality " << visual_quality_active
+              << " pre med/mad " << qi_last_visual_pre_median_ << "/"
+              << qi_last_visual_pre_mad_
+              << " post med/mad " << qi_last_visual_post_median_ << "/"
+              << qi_last_visual_post_mad_
+              << " logdet/gain/cond/coverage "
+              << qi_last_visual_logdet_ << "/"
+              << qi_last_visual_gain_mean_ << "/"
+              << qi_last_visual_cond_ << "/"
+              << qi_last_visual_info_coverage_
+              << RESET << std::endl;
+  }
+
+  void OdometryManager::WriteQiCsv(
+      int64_t scan_timestamp, int64_t image_timestamp,
+      bool process_image, bool optimization_success)
+  {
+    if (!qi_csv_.is_open())
+      return;
+
+    qi_csv_
+        << scan_timestamp << ","
+        << image_timestamp << ","
+        << static_cast<int>(process_image) << ","
+        << static_cast<int>(optimization_success) << ","
+        << static_cast<int>(qi_config_.quality_enable) << ","
+        << static_cast<int>(qi_config_.selection_enable) << ","
+        << qi_characteristic_length_ << ","
+        << qi_last_lidar_candidates_ << ","
+        << qi_last_lidar_selected_ << ","
+        << qi_last_lidar_q_min_ << ","
+        << qi_last_lidar_q_mean_ << ","
+        << qi_last_lidar_q_max_ << ","
+        << qi_last_lidar_weight_ratio_min_ << ","
+        << qi_last_lidar_weight_ratio_mean_ << ","
+        << qi_last_lidar_weight_ratio_max_ << ","
+        << qi_last_lidar_info_coverage_ << ","
+        << qi_last_lidar_cond_ << ","
+        << qi_last_lidar_pre_median_ << ","
+        << qi_last_lidar_pre_mad_ << ","
+        << qi_last_lidar_post_median_ << ","
+        << qi_last_lidar_post_mad_ << ","
+        << qi_lidar_scale_.sigma << ","
+        << qi_last_visual_candidates_ << ","
+        << qi_last_visual_selected_ << ","
+        << qi_last_visual_q_min_ << ","
+        << qi_last_visual_q_mean_ << ","
+        << qi_last_visual_q_max_ << ","
+        << qi_last_visual_weight_ratio_min_ << ","
+        << qi_last_visual_weight_ratio_mean_ << ","
+        << qi_last_visual_weight_ratio_max_ << ","
+        << qi_last_visual_info_coverage_ << ","
+        << qi_last_visual_cond_ << ","
+        << qi_last_visual_pre_median_ << ","
+        << qi_last_visual_pre_mad_ << ","
+        << qi_last_visual_post_median_ << ","
+        << qi_last_visual_post_mad_ << ","
+        << qi_visual_scale_.sigma << ","
+        << qi_last_n_pnp_ << ","
+        << qi_last_eta_pnp_ << ","
+        << qi_last_eta_fmat_ << "\n";
+    qi_csv_.flush();
   }
 
   void OdometryManager::RunBag()
@@ -265,9 +1239,22 @@ namespace cocolic
     // lic optimization
     ProcessLICData();
 
-    // prior update
-    trajectory_manager_->UpdateLICPrior(
-        lidar_handler_->GetPointCorrespondence());
+    // The marginalized prior must contain the same selected observations and
+    // the same square-root weights as the final current-window solve.
+    const bool qi_enabled =
+        qi_config_.quality_enable || qi_config_.selection_enable;
+    if (qi_enabled)
+    {
+      trajectory_manager_->UpdateLICPrior(
+          qi_selected_point_corrs_,
+          &qi_selected_lidar_weights_,
+          &qi_selected_visual_weights_);
+    }
+    else
+    {
+      trajectory_manager_->UpdateLICPrior(
+          lidar_handler_->GetPointCorrespondence());
+    }
 
     // remove old imu data
     auto &msg = msg_manager_->cur_msgs;
@@ -314,15 +1301,8 @@ namespace cocolic
     {
       SE3d Twc = trajectory_->GetCameraPoseNURBS(msg.image_timestamp);
       camera_handler_->UpdateVisualSubMap(msg.image, msg.image_timestamp * NS_TO_S, Twc.unit_quaternion(), Twc.translation());
-      // v_points_.clear();
-      // px_obss_.clear();
+      BuildVisualObs();
       auto &map_rgb_pts_in_last_frame_pos = camera_handler_->op_track.m_map_rgb_pts_in_last_frame_pos;
-      for (auto it = map_rgb_pts_in_last_frame_pos.begin(); it != map_rgb_pts_in_last_frame_pos.end(); it++)
-      {
-        RGB_pts *rgb_pt = ((RGB_pts *)it->first);
-        v_points_.push_back(Eigen::Vector3d(rgb_pt->get_pos()(0, 0), rgb_pt->get_pos()(1, 0), rgb_pt->get_pos()(2, 0)));
-        px_obss_.push_back(Eigen::Vector2d(it->second.x, it->second.y));
-      }
 
       if (odom_viewer_.pub_track_img_.getNumSubscribers() != 0 || odom_viewer_.pub_sub_visual_map_.getNumSubscribers() != 0)
       {
@@ -352,6 +1332,41 @@ namespace cocolic
     }
 
     /// [5] finely optimize trajectory based on prior、lidar、imu、camera
+    const bool qi_enabled =
+        qi_config_.quality_enable || qi_config_.selection_enable;
+    if (qi_enabled)
+    {
+      qi_selected_lidar_obs_.clear();
+      qi_selected_point_corrs_.clear();
+      qi_selected_lidar_weights_.clear();
+      qi_selected_visual_obs_.clear();
+      qi_selected_visual_points_.clear();
+      qi_selected_visual_pixels_.clear();
+      qi_selected_visual_weights_.clear();
+      if (!process_image)
+      {
+        qi_visual_obs_.clear();
+        qi_last_visual_candidates_ = 0;
+        qi_last_visual_selected_ = 0;
+        qi_last_visual_q_min_ = 1.0;
+        qi_last_visual_q_mean_ = 1.0;
+        qi_last_visual_q_max_ = 1.0;
+        qi_last_visual_weight_ratio_min_ = 1.0;
+        qi_last_visual_weight_ratio_mean_ = 1.0;
+        qi_last_visual_weight_ratio_max_ = 1.0;
+        qi_last_visual_info_coverage_ = 0.0;
+        qi_last_visual_cond_ = 0.0;
+        qi_last_visual_pre_median_ = 0.0;
+        qi_last_visual_pre_mad_ = 0.0;
+        qi_last_visual_post_median_ = 0.0;
+        qi_last_visual_post_mad_ = 0.0;
+        qi_last_n_pnp_ = 0;
+        qi_last_eta_pnp_ = 0.0;
+        qi_last_eta_fmat_ = 0.0;
+      }
+    }
+
+    bool last_optimization_success = false;
     for (int iter = 0; iter < lidar_iter_; ++iter)
     {
       lidar_handler_->GetLoamFeatureAssociation();
@@ -378,19 +1393,60 @@ namespace cocolic
             trajectory_manager_->opt_max_t_ns, use_lidar_scale_);
       }
 
-      if (process_image)
+      if (qi_enabled)
       {
-        trajectory_manager_->UpdateTrajectoryWithLIC(
+        // The detector above always sees the full candidate pool. Only after
+        // that read-only audit may QI weight or select observations.
+        PrepareQiLidarObs(lidar_handler_->GetPointCorrespondence());
+        if (process_image)
+        {
+          PrepareQiVisualObs(msg.image_timestamp);
+          last_optimization_success =
+              trajectory_manager_->UpdateTrajectoryWithLIC(
+                  iter, msg.image_timestamp,
+                  qi_selected_point_corrs_,
+                  qi_selected_visual_points_,
+                  qi_selected_visual_pixels_, 8,
+                  &qi_selected_lidar_weights_,
+                  &qi_selected_visual_weights_);
+        }
+        else
+        {
+          qi_selected_visual_obs_.clear();
+          qi_selected_visual_points_.clear();
+          qi_selected_visual_pixels_.clear();
+          qi_selected_visual_weights_.clear();
+          last_optimization_success =
+              trajectory_manager_->UpdateTrajectoryWithLIC(
+                  iter, msg.image_timestamp,
+                  qi_selected_point_corrs_, {}, {}, 8,
+                  &qi_selected_lidar_weights_, nullptr);
+          trajectory_manager_->SetProcessCurImg(false);
+        }
+      }
+      else if (process_image)
+      {
+        last_optimization_success =
+            trajectory_manager_->UpdateTrajectoryWithLIC(
             iter, msg.image_timestamp,
             lidar_handler_->GetPointCorrespondence(), v_points_, px_obss_, 8);
       }
       else
       {
-        trajectory_manager_->UpdateTrajectoryWithLIC(
+        last_optimization_success =
+            trajectory_manager_->UpdateTrajectoryWithLIC(
             iter, msg.image_timestamp,
             lidar_handler_->GetPointCorrespondence(), {}, {}, 8);
         trajectory_manager_->SetProcessCurImg(false);
       }
+    }
+    if (qi_enabled)
+    {
+      UpdateQiResidualStatistics(msg.image_timestamp, process_image,
+                                 last_optimization_success);
+      WriteQiCsv(msg.lidar_timestamp, msg.image_timestamp, process_image,
+                 last_optimization_success);
+      LogQiSummary();
     }
     PublishCloudAndTrajectory();
 
