@@ -95,6 +95,50 @@ namespace cocolic
     }
   } // namespace
 
+  TEST(CasrShadowAudit, PreservesUngatedSupportBasisWithoutRoutingIt)
+  {
+    CasrShadowConfig config;
+    config.enabled = true;
+    CasrShadowEvaluator evaluator;
+    evaluator.Configure(config);
+
+    const Eigen::MatrixXd support_basis = ConstantKnotDirection(4);
+    const int dimension = static_cast<int>(support_basis.rows());
+    const Eigen::MatrixXd information =
+        Eigen::MatrixXd::Identity(dimension, dimension);
+    const Eigen::MatrixXd cross = Eigen::MatrixXd::Zero(dimension, 6);
+    Eigen::MatrixXd representative = Eigen::MatrixXd::Zero(6, dimension);
+    representative.leftCols(6).setIdentity();
+
+    CasrShadowInput input;
+    input.environment_valid = true;
+    input.support_valid = true;
+    input.environment_state = false;
+    input.support_state = false;
+    input.support_quality_min = 0.8;
+    input.environment_relative_eigenvalues.setOnes();
+    input.environment_eigenvectors.setIdentity();
+    input.support_control_point_start_index = 10;
+    input.support_knot_weak_basis = &support_basis;
+    input.reference_pose_information = &information;
+    input.reference_pose_cross = &cross;
+    input.representative_pose_mapping = &representative;
+
+    const CasrShadowResult result = evaluator.Evaluate(input, nullptr);
+    ASSERT_TRUE(result.valid);
+    EXPECT_EQ(result.cause, 0);
+    EXPECT_EQ(result.route, CasrRoute::Inactive);
+    EXPECT_EQ(result.support_rank, 0);
+    EXPECT_EQ(result.support_knot_basis.cols(), 0);
+    ASSERT_EQ(result.support_audit_knot_basis.cols(), 1);
+    const Eigen::MatrixXd audit_gram =
+        result.support_audit_knot_basis.transpose() *
+        result.support_audit_knot_basis;
+    EXPECT_NEAR(audit_gram(0, 0), 1.0, 1e-12);
+    EXPECT_EQ(result.recovery_rank, 0);
+    EXPECT_EQ(result.recovery_knot_basis.cols(), 0);
+  }
+
   TEST(CasrShadowTemporalGate, IsInvariantToRollingWindowBoundaryLoss)
   {
     CasrShadowConfig config;
