@@ -74,6 +74,18 @@ namespace cocolic
     double support_weakest_rotation_ratio = 0.0;
     double support_boundary_energy_ratio = 0.0;
 
+    // Interpretable timestamp-distribution audit. These fields describe the
+    // accepted real LiDAR correspondences that actually entered the support
+    // matrix, using the same within-interval cells as the fixed reference.
+    size_t support_sample_num = 0;
+    int support_empty_interval_num = 0;
+    int support_min_interval_sample_num = 0;
+    int support_max_interval_sample_num = 0;
+    int support_temporal_bin_num = 0;
+    int support_occupied_temporal_bin_num = 0;
+    double support_occupied_temporal_bin_ratio = 0.0;
+    double support_temporal_mass_l1 = 0.0;
+
     // Internal CASR-v2 bridge. Weak generalized modes remain in the active 6K
     // control-point space instead of being folded into a 6DoF outer product.
     // The reference matrices define the scan-wide least-squares lift from a
