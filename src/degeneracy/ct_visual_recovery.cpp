@@ -19,6 +19,7 @@
 #include <limits>
 #include <map>
 #include <queue>
+#include <random>
 #include <utility>
 #include <vector>
 
@@ -84,6 +85,20 @@ CtVisualRecovery::CtVisualRecovery(
   if (node["max_additional_visual_observations"]) {
     max_additional_visual_observations_ = std::max(
         node["max_additional_visual_observations"].as<int>(), 0);
+  }
+  if (node["selection_policy"]) {
+    selection_policy_ = node["selection_policy"].as<std::string>();
+  }
+  if (selection_policy_ != "weak_subspace" &&
+      selection_policy_ != "random" &&
+      selection_policy_ != "global_d") {
+    std::cerr << "[CT-Visual] Unknown selection_policy='"
+              << selection_policy_
+              << "'; using weak_subspace.\n";
+    selection_policy_ = "weak_subspace";
+  }
+  if (node["random_seed"]) {
+    random_seed_ = node["random_seed"].as<uint32_t>();
   }
 
   if (enabled_ && output_csv_) {
@@ -291,6 +306,7 @@ CtVisualRecoveryResult CtVisualRecovery::Select(
   result.scan_time_ns = scan_time_ns;
   result.image_time_ns = image_time_ns;
   result.apply_requested = ApplyToEstimator();
+  result.selection_policy = selection_policy_;
   result.visual_candidate_count =
       static_cast<int>(observations.size());
   result.weak_rank = lidar_result.weak_rank;
@@ -469,6 +485,7 @@ CtVisualRecoveryResult CtVisualRecovery::Select(
   const int repair_budget = std::min(
       max_additional_visual_observations_,
       result.eligible_unselected_count);
+  std::vector<int> weak_policy_indices;
   result.state = "candidates_exhausted";
   for (int selected_count = 0;
        selected_count < repair_budget; ++selected_count) {
@@ -517,10 +534,9 @@ CtVisualRecoveryResult CtVisualRecovery::Select(
         weak_basis.transpose() * selected_information.information *
         weak_basis;
     global_repaired += selected_information.information;
-    result.additional_source_indices.push_back(
-        selected_information.source_index);
+    weak_policy_indices.push_back(best_index);
     result.additional_selected_count =
-        static_cast<int>(result.additional_source_indices.size());
+        static_cast<int>(weak_policy_indices.size());
     result.repaired_weak_d_efficiency =
         RelativeDEfficiency(weak_repaired, weak_full);
     if (result.repaired_weak_d_efficiency >=
@@ -537,6 +553,140 @@ CtVisualRecoveryResult CtVisualRecovery::Select(
       MinimumDirectionRetention(weak_repaired, weak_full);
   result.repaired_global_d_efficiency =
       RelativeDEfficiency(global_repaired, global_full);
+  result.weak_policy_selected_count =
+      static_cast<int>(weak_policy_indices.size());
+  result.weak_policy_weak_d_efficiency =
+      result.repaired_weak_d_efficiency;
+  result.weak_policy_weak_min_retention =
+      result.repaired_weak_min_retention;
+  result.weak_policy_global_d_efficiency =
+      result.repaired_global_d_efficiency;
+
+  std::vector<int> eligible_indices;
+  eligible_indices.reserve(
+      static_cast<size_t>(result.eligible_unselected_count));
+  for (size_t index = 0; index < pose_information.size(); ++index) {
+    if (!pose_information[index].baseline_selected) {
+      eligible_indices.push_back(static_cast<int>(index));
+    }
+  }
+
+  // All comparison policies receive exactly the number of observations that
+  // the proposed weak-subspace policy requested on this frame. This removes
+  // observation count as a confounder in both shadow audits and armed
+  // trajectory comparisons.
+  std::vector<int> random_policy_indices = eligible_indices;
+  const uint64_t scan_bits = static_cast<uint64_t>(scan_time_ns);
+  const uint64_t image_bits = static_cast<uint64_t>(image_time_ns);
+  const uint32_t mixed_seed =
+      random_seed_ ^ static_cast<uint32_t>(scan_bits) ^
+      static_cast<uint32_t>(scan_bits >> 32) ^
+      static_cast<uint32_t>(image_bits) ^
+      static_cast<uint32_t>(image_bits >> 32);
+  std::mt19937 random_generator(mixed_seed);
+  std::shuffle(random_policy_indices.begin(), random_policy_indices.end(),
+               random_generator);
+  random_policy_indices.resize(
+      std::min(random_policy_indices.size(),
+               weak_policy_indices.size()));
+
+  std::vector<int> global_d_policy_indices;
+  Eigen::Matrix<double, 6, 6> global_d_information = global_baseline;
+  std::vector<char> global_d_used(pose_information.size(), 0);
+  for (size_t round = 0; round < weak_policy_indices.size(); ++round) {
+    const double current_global_logdet = LogDet(global_d_information);
+    double best_global_gain =
+        -std::numeric_limits<double>::infinity();
+    int best_global_index = -1;
+    for (const int candidate_index : eligible_indices) {
+      if (global_d_used[static_cast<size_t>(candidate_index)]) {
+        continue;
+      }
+      const double gain =
+          LogDet(global_d_information +
+                 pose_information[static_cast<size_t>(candidate_index)]
+                     .information) -
+          current_global_logdet;
+      if (gain > best_global_gain + 1.0e-12 ||
+          (std::abs(gain - best_global_gain) <= 1.0e-12 &&
+           (best_global_index < 0 ||
+            candidate_index < best_global_index))) {
+        best_global_gain = gain;
+        best_global_index = candidate_index;
+      }
+    }
+    if (best_global_index < 0 ||
+        !std::isfinite(best_global_gain)) {
+      break;
+    }
+    global_d_used[static_cast<size_t>(best_global_index)] = 1;
+    global_d_policy_indices.push_back(best_global_index);
+    global_d_information +=
+        pose_information[static_cast<size_t>(best_global_index)]
+            .information;
+  }
+
+  const auto evaluate_policy =
+      [&](const std::vector<int>& indices, double& weak_d,
+          double& weak_min, double& global_d) {
+        Eigen::MatrixXd policy_weak =
+            weak_prior + weak_information_baseline_raw;
+        Eigen::Matrix<double, 6, 6> policy_global = global_baseline;
+        for (const int information_index : indices) {
+          if (information_index < 0 ||
+              information_index >=
+                  static_cast<int>(pose_information.size())) {
+            continue;
+          }
+          const auto& information =
+              pose_information[static_cast<size_t>(information_index)]
+                  .information;
+          policy_weak +=
+              weak_basis.transpose() * information * weak_basis;
+          policy_global += information;
+        }
+        weak_d = RelativeDEfficiency(policy_weak, weak_full);
+        weak_min =
+            MinimumDirectionRetention(policy_weak, weak_full);
+        global_d =
+            RelativeDEfficiency(policy_global, global_full);
+      };
+
+  evaluate_policy(
+      random_policy_indices,
+      result.random_policy_weak_d_efficiency,
+      result.random_policy_weak_min_retention,
+      result.random_policy_global_d_efficiency);
+  evaluate_policy(
+      global_d_policy_indices,
+      result.global_d_policy_weak_d_efficiency,
+      result.global_d_policy_weak_min_retention,
+      result.global_d_policy_global_d_efficiency);
+
+  const std::vector<int>* selected_policy_indices =
+      &weak_policy_indices;
+  if (selection_policy_ == "random") {
+    selected_policy_indices = &random_policy_indices;
+    result.state = "random_weak_count_matched";
+  } else if (selection_policy_ == "global_d") {
+    selected_policy_indices = &global_d_policy_indices;
+    result.state = "global_d_weak_count_matched";
+  }
+
+  result.additional_source_indices.clear();
+  for (const int information_index : *selected_policy_indices) {
+    result.additional_source_indices.push_back(
+        pose_information[static_cast<size_t>(information_index)]
+            .source_index);
+  }
+  result.additional_selected_count =
+      static_cast<int>(result.additional_source_indices.size());
+  if (selection_policy_ != "weak_subspace") {
+    evaluate_policy(*selected_policy_indices,
+                    result.repaired_weak_d_efficiency,
+                    result.repaired_weak_min_retention,
+                    result.repaired_global_d_efficiency);
+  }
   result.applied =
       result.apply_requested && result.additional_selected_count > 0;
   WriteCsv(result);
@@ -544,16 +694,27 @@ CtVisualRecoveryResult CtVisualRecovery::Select(
 }
 
 void CtVisualRecovery::WriteCsvHeader() {
-  csv_ << "scan_time_ns,image_time_ns,valid,eligible,state,"
+  csv_ << "scan_time_ns,image_time_ns,selection_policy,random_seed,"
+          "valid,eligible,state,"
           "apply_requested,applied,weak_rank,visual_candidate_count,"
           "valid_factor_count,rejected_factor_count,"
           "baseline_selected_count,eligible_unselected_count,"
           "additional_budget,additional_selected_count,"
+          "weak_policy_selected_count,"
           "weak_d_efficiency_target,baseline_weak_d_efficiency,"
           "repaired_weak_d_efficiency,baseline_weak_min_retention,"
           "repaired_weak_min_retention,baseline_global_d_efficiency,"
           "repaired_global_d_efficiency,median_factorization_error,"
-          "max_factorization_error\n";
+          "max_factorization_error,"
+          "weak_policy_weak_d_efficiency,"
+          "weak_policy_weak_min_retention,"
+          "weak_policy_global_d_efficiency,"
+          "random_policy_weak_d_efficiency,"
+          "random_policy_weak_min_retention,"
+          "random_policy_global_d_efficiency,"
+          "global_d_policy_weak_d_efficiency,"
+          "global_d_policy_weak_min_retention,"
+          "global_d_policy_global_d_efficiency\n";
   csv_ << std::setprecision(17);
 }
 
@@ -563,6 +724,7 @@ void CtVisualRecovery::WriteCsv(
     return;
   }
   csv_ << result.scan_time_ns << ',' << result.image_time_ns << ','
+       << result.selection_policy << ',' << random_seed_ << ','
        << static_cast<int>(result.valid) << ','
        << static_cast<int>(result.eligible) << ',' << result.state << ','
        << static_cast<int>(result.apply_requested) << ','
@@ -574,6 +736,7 @@ void CtVisualRecovery::WriteCsv(
        << result.eligible_unselected_count << ','
        << result.additional_budget << ','
        << result.additional_selected_count << ','
+       << result.weak_policy_selected_count << ','
        << result.weak_d_efficiency_target << ','
        << result.baseline_weak_d_efficiency << ','
        << result.repaired_weak_d_efficiency << ','
@@ -582,7 +745,16 @@ void CtVisualRecovery::WriteCsv(
        << result.baseline_global_d_efficiency << ','
        << result.repaired_global_d_efficiency << ','
        << result.median_factorization_error << ','
-       << result.max_factorization_error << '\n';
+       << result.max_factorization_error << ','
+       << result.weak_policy_weak_d_efficiency << ','
+       << result.weak_policy_weak_min_retention << ','
+       << result.weak_policy_global_d_efficiency << ','
+       << result.random_policy_weak_d_efficiency << ','
+       << result.random_policy_weak_min_retention << ','
+       << result.random_policy_global_d_efficiency << ','
+       << result.global_d_policy_weak_d_efficiency << ','
+       << result.global_d_policy_weak_min_retention << ','
+       << result.global_d_policy_global_d_efficiency << '\n';
   csv_.flush();
 }
 

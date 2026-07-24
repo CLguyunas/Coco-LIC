@@ -215,6 +215,14 @@ namespace cocolic
                     int64_t image_timestamp,
                     bool process_image,
                     bool optimization_success);
+    void WriteExperimentProfile(
+        int64_t scan_timestamp, int64_t image_timestamp,
+        bool process_image, bool optimization_success,
+        const CtLidarObservabilityResult &lidar_result,
+        const CtVisualRecoveryResult &recovery_result,
+        double ct_detector_ms, double qi_lidar_ms,
+        double qi_visual_ms, double ct_recovery_ms,
+        double lic_solver_ms, double core_total_ms);
     void LogQiSummary() const;
 
     double ComputeLidarResidual(const PointCorrespondence &corr,
@@ -331,6 +339,8 @@ namespace cocolic
     double qi_image_weight_ = 1.0;
     double qi_characteristic_length_ = 1.0;
     std::ofstream qi_csv_;
+    bool experiment_profile_enabled_ = false;
+    std::ofstream experiment_profile_csv_;
 
     Eigen::aligned_vector<QiLidarObs> qi_lidar_obs_;
     Eigen::aligned_vector<QiLidarObs> qi_selected_lidar_obs_;

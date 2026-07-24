@@ -37,6 +37,9 @@ ct_degeneracy:
   enabled: false
   apply: false
   output_csv: true
+  # continuous_time is the proposed detector. scan_6d is an experiment-only
+  # ablation using the same factors at one common reference pose.
+  detector_mode: continuous_time
   weak_eigenvalue_ratio: 3.0e-3
 
 # CT weak-direction-driven visual complement. It only reselects real tracked
@@ -49,7 +52,15 @@ ct_visual_recovery:
   enabled: false
   apply_to_estimator: false
   output_csv: true
+  # Experimental policies always use the weak-subspace policy's per-frame
+  # additional count, so observation budget cannot confound the comparison.
+  selection_policy: weak_subspace
+  random_seed: 42
   max_additional_visual_observations: 64
+
+# Per-frame module timing for paper experiments. It does not alter the solve.
+experiment_profile:
+  enabled: false
 
 # Existing QI observation management, ported without coupling it to the
 # CT detector. Both master switches false reproduce the original path.

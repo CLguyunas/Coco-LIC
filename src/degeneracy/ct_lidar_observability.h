@@ -51,6 +51,7 @@ struct CtLidarObservabilityResult {
   std::vector<int> free_knot_indices;
   Eigen::MatrixXd control_to_reference_pose;
   Eigen::MatrixXd reference_pose_lift;
+  std::string detector_mode = "continuous_time";
   std::string state = "invalid";
 };
 
@@ -82,6 +83,8 @@ class CtLidarObservability {
   Trajectory::Ptr trajectory_;
   bool enabled_ = false;
   bool output_csv_ = true;
+  bool scan_6d_baseline_ = false;
+  std::string detector_mode_ = "continuous_time";
   double weak_eigenvalue_ratio_ = 3.0e-3;
   int scan_count_ = 0;
   int enter_count_ = 0;

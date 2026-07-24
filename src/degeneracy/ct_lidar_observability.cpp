@@ -66,6 +66,16 @@ CtLidarObservability::CtLidarObservability(
 
   enabled_ = node["enabled"] ? node["enabled"].as<bool>() : false;
   output_csv_ = node["output_csv"] ? node["output_csv"].as<bool>() : true;
+  if (node["detector_mode"]) {
+    detector_mode_ = node["detector_mode"].as<std::string>();
+  }
+  if (detector_mode_ == "scan_6d") {
+    scan_6d_baseline_ = true;
+  } else if (detector_mode_ != "continuous_time") {
+    std::cerr << "[CT-LiDAR] Unknown detector_mode='" << detector_mode_
+              << "'; using continuous_time.\n";
+    detector_mode_ = "continuous_time";
+  }
   if (node["weak_eigenvalue_ratio"]) {
     weak_eigenvalue_ratio_ =
         std::max(node["weak_eigenvalue_ratio"].as<double>(), 1.0e-12);
@@ -108,6 +118,7 @@ CtLidarObservabilityResult CtLidarObservability::Analyze(
   result.reference_time_ns = reference_time_ns;
   result.correspondence_count = static_cast<int>(correspondences.size());
   result.decision_threshold = weak_eigenvalue_ratio_;
+  result.detector_mode = detector_mode_;
 
   if (!enabled_ || !trajectory_ || correspondences.empty() ||
       !IsTimeUsable(reference_time_ns)) {
@@ -146,7 +157,9 @@ CtLidarObservabilityResult CtLidarObservability::Analyze(
         !IsTimeUsable(correspondence.t_point)) {
       continue;
     }
-    add_support_knots(correspondence.t_point);
+    if (!scan_6d_baseline_) {
+      add_support_knots(correspondence.t_point);
+    }
     if (std::isfinite(correspondence.point.norm())) {
       point_ranges.push_back(correspondence.point.norm());
     }
@@ -179,8 +192,14 @@ CtLidarObservabilityResult CtLidarObservability::Analyze(
       continue;
     }
 
+    // The experiment-only scan_6d baseline freezes every point residual at
+    // the common reference pose. It deliberately keeps the same associated
+    // points, geometric residual implementation, weights and decision rule;
+    // only continuous point time and multi-knot support are removed.
+    const int64_t factor_time_ns =
+        scan_6d_baseline_ ? reference_time_ns : correspondence.t_point;
     std::pair<int, double> su{-1, 0.0};
-    trajectory_->GetIdxT(correspondence.t_point, su);
+    trajectory_->GetIdxT(factor_time_ns, su);
     if (su.first < 3) {
       continue;
     }
@@ -191,7 +210,7 @@ CtLidarObservabilityResult CtLidarObservability::Analyze(
 
     if (correspondence.geo_type != Plane) {
       const SE3d T_lidar =
-          trajectory_->GetLidarPoseNURBS(correspondence.t_point);
+          trajectory_->GetLidarPoseNURBS(factor_time_ns);
       const Eigen::Vector3d point_map = T_lidar * correspondence.point;
       const double line_distance =
           ((point_map - correspondence.geo_point)
@@ -212,7 +231,7 @@ CtLidarObservabilityResult CtLidarObservability::Analyze(
         use_correspondence_scale ? correspondence.scale : 1.0;
 
     analytic_derivative::LoamFeatureFactorNURBS factor(
-        correspondence.t_point, correspondence, su, blending_matrix,
+        factor_time_ns, correspondence, su, blending_matrix,
         cumulative_blending_matrix, S_GtoM, p_GinM, S_LtoI, p_LinI,
         factor_weight);
 
@@ -433,6 +452,7 @@ CtLidarObservabilityResult CtLidarObservability::Analyze(
   ++scan_count_;
   if (scan_count_ % kPrintEveryNScans == 0) {
     std::cout << "[CT-LiDAR] scan=" << scan_count_
+              << " mode=" << detector_mode_
               << " factors=" << result.evaluated_factor_count
               << " free_knots=" << result.free_knot_count
               << " weak_rank=" << result.weak_rank
@@ -464,7 +484,8 @@ void CtLidarObservability::UpdatePersistentState(bool enter_condition,
 }
 
 void CtLidarObservability::WriteCsvHeader() {
-  csv_ << "scan_time_ns,reference_time_ns,valid,state,raw_degenerate,"
+  csv_ << "scan_time_ns,reference_time_ns,detector_mode,valid,state,"
+          "raw_degenerate,"
           "persistent_degenerate,weak_rank,correspondence_count,"
           "evaluated_factor_count,skipped_nondifferentiable_line_count,"
           "free_knot_count,characteristic_length,numerical_floor,"
@@ -480,6 +501,7 @@ void CtLidarObservability::WriteCsv(
     return;
   }
   csv_ << result.scan_time_ns << ',' << result.reference_time_ns << ','
+       << result.detector_mode << ','
        << static_cast<int>(result.valid) << ',' << result.state << ','
        << static_cast<int>(result.raw_degenerate) << ','
        << static_cast<int>(result.persistent_degenerate) << ','

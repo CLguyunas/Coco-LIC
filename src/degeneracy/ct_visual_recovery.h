@@ -15,6 +15,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include <fstream>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
@@ -45,6 +46,7 @@ struct CtVisualRecoveryResult {
   int eligible_unselected_count = 0;
   int additional_budget = 0;
   int additional_selected_count = 0;
+  int weak_policy_selected_count = 0;
   int64_t scan_time_ns = 0;
   int64_t image_time_ns = 0;
   double weak_d_efficiency_target = 0.95;
@@ -54,9 +56,19 @@ struct CtVisualRecoveryResult {
   double repaired_weak_min_retention = 0.0;
   double baseline_global_d_efficiency = 0.0;
   double repaired_global_d_efficiency = 0.0;
+  double weak_policy_weak_d_efficiency = 0.0;
+  double weak_policy_weak_min_retention = 0.0;
+  double weak_policy_global_d_efficiency = 0.0;
+  double random_policy_weak_d_efficiency = 0.0;
+  double random_policy_weak_min_retention = 0.0;
+  double random_policy_global_d_efficiency = 0.0;
+  double global_d_policy_weak_d_efficiency = 0.0;
+  double global_d_policy_weak_min_retention = 0.0;
+  double global_d_policy_global_d_efficiency = 0.0;
   double median_factorization_error = 0.0;
   double max_factorization_error = 0.0;
   std::vector<int> additional_source_indices;
+  std::string selection_policy = "weak_subspace";
   std::string state = "invalid";
 };
 
@@ -117,6 +129,8 @@ class CtVisualRecovery {
   bool apply_to_estimator_ = false;
   bool output_csv_ = true;
   int max_additional_visual_observations_ = 64;
+  uint32_t random_seed_ = 42;
+  std::string selection_policy_ = "weak_subspace";
   std::ofstream csv_;
 };
 

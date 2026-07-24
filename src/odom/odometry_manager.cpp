@@ -19,6 +19,7 @@
 #include <eigen_conversions/eigen_msg.h>
 #include <odom/odometry_manager.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -288,6 +289,37 @@ namespace cocolic
       {
         std::cerr << "[QI] Cannot open audit CSV: "
                   << cache_path_ + "_qi_observation.csv" << "\n";
+      }
+    }
+
+    const YAML::Node experiment_profile_node =
+        node["experiment_profile"];
+    experiment_profile_enabled_ =
+        experiment_profile_node && experiment_profile_node["enabled"]
+            ? experiment_profile_node["enabled"].as<bool>()
+            : false;
+    if (experiment_profile_enabled_)
+    {
+      experiment_profile_csv_.open(
+          cache_path_ + "_experiment_profile.csv",
+          std::ios::out | std::ios::trunc);
+      if (experiment_profile_csv_.is_open())
+      {
+        experiment_profile_csv_
+            << "scan_time_ns,image_time_ns,process_image,"
+               "optimization_success,detector_mode,ct_valid,"
+               "ct_persistent,ct_weak_rank,recovery_policy,"
+               "recovery_eligible,recovery_added,"
+               "lidar_candidates,lidar_selected,visual_candidates,"
+               "visual_selected,ct_detector_ms,qi_lidar_ms,"
+               "qi_visual_ms,ct_recovery_ms,lic_solver_ms,"
+               "core_total_ms\n";
+        experiment_profile_csv_ << std::setprecision(17);
+      }
+      else
+      {
+        std::cerr << "[Experiment] Cannot open profile CSV: "
+                  << cache_path_ + "_experiment_profile.csv" << "\n";
       }
     }
 
@@ -1331,6 +1363,41 @@ namespace cocolic
     qi_csv_.flush();
   }
 
+  void OdometryManager::WriteExperimentProfile(
+      int64_t scan_timestamp, int64_t image_timestamp,
+      bool process_image, bool optimization_success,
+      const CtLidarObservabilityResult &lidar_result,
+      const CtVisualRecoveryResult &recovery_result,
+      double ct_detector_ms, double qi_lidar_ms,
+      double qi_visual_ms, double ct_recovery_ms,
+      double lic_solver_ms, double core_total_ms)
+  {
+    if (!experiment_profile_enabled_ ||
+        !experiment_profile_csv_.is_open())
+    {
+      return;
+    }
+    experiment_profile_csv_
+        << scan_timestamp << "," << image_timestamp << ","
+        << static_cast<int>(process_image) << ","
+        << static_cast<int>(optimization_success) << ","
+        << lidar_result.detector_mode << ","
+        << static_cast<int>(lidar_result.valid) << ","
+        << static_cast<int>(lidar_result.persistent_degenerate) << ","
+        << lidar_result.weak_rank << ","
+        << recovery_result.selection_policy << ","
+        << static_cast<int>(recovery_result.eligible) << ","
+        << recovery_result.additional_selected_count << ","
+        << qi_last_lidar_candidates_ << ","
+        << qi_last_lidar_selected_ << ","
+        << qi_last_visual_candidates_ << ","
+        << qi_last_visual_selected_ << ","
+        << ct_detector_ms << "," << qi_lidar_ms << ","
+        << qi_visual_ms << "," << ct_recovery_ms << ","
+        << lic_solver_ms << "," << core_total_ms << "\n";
+    experiment_profile_csv_.flush();
+  }
+
   void OdometryManager::RunBag()
   {
     while (ros::ok())
@@ -1462,6 +1529,20 @@ namespace cocolic
 
   void OdometryManager::ProcessLICData()
   {
+    using ProfileClock = std::chrono::steady_clock;
+    const auto core_begin = ProfileClock::now();
+    const auto elapsed_ms = [](const ProfileClock::time_point &begin)
+    {
+      return std::chrono::duration<double, std::milli>(
+                 ProfileClock::now() - begin)
+          .count();
+    };
+    double ct_detector_ms = 0.0;
+    double qi_lidar_ms = 0.0;
+    double qi_visual_ms = 0.0;
+    double ct_recovery_ms = 0.0;
+    double lic_solver_ms = 0.0;
+
     auto &msg = msg_manager_->cur_msgs;  // fake points with timestamp -1 exist up to now
     msg.CheckData();
 
@@ -1567,6 +1648,7 @@ namespace cocolic
 
     bool last_optimization_success = false;
     CtLidarObservabilityResult ct_lidar_result;
+    CtVisualRecoveryResult ct_recovery_result;
     for (int iter = 0; iter < lidar_iter_; ++iter)
     {
       lidar_handler_->GetLoamFeatureAssociation();
@@ -1586,27 +1668,36 @@ namespace cocolic
           reference_time_ns =
               std::min(reference_time_ns, trajectory_->knts.back() - 1);
         }
+        const auto ct_begin = ProfileClock::now();
         ct_lidar_result = ct_lidar_observability_->Analyze(
             msg.lidar_timestamp, reference_time_ns,
             lidar_handler_->GetPointCorrespondence(),
             trajectory_manager_->opt_min_t_ns,
             trajectory_manager_->opt_max_t_ns, use_lidar_scale_);
+        ct_detector_ms += elapsed_ms(ct_begin);
       }
 
       if (qi_enabled)
       {
         // The detector above always sees the full candidate pool. Only after
         // that read-only audit may QI weight or select observations.
+        const auto qi_lidar_begin = ProfileClock::now();
         PrepareQiLidarObs(lidar_handler_->GetPointCorrespondence());
+        qi_lidar_ms += elapsed_ms(qi_lidar_begin);
         if (process_image)
         {
+          const auto qi_visual_begin = ProfileClock::now();
           PrepareQiVisualObs(msg.image_timestamp);
+          qi_visual_ms += elapsed_ms(qi_visual_begin);
           if (iter == lidar_iter_ - 1)
           {
-            PrepareCtVisualRecovery(
+            const auto recovery_begin = ProfileClock::now();
+            ct_recovery_result = PrepareCtVisualRecovery(
                 msg.lidar_timestamp, msg.image_timestamp,
                 ct_lidar_result);
+            ct_recovery_ms += elapsed_ms(recovery_begin);
           }
+          const auto solver_begin = ProfileClock::now();
           last_optimization_success =
               trajectory_manager_->UpdateTrajectoryWithLIC(
                   iter, msg.image_timestamp,
@@ -1615,6 +1706,7 @@ namespace cocolic
                   qi_selected_visual_pixels_, 8,
                   &qi_selected_lidar_weights_,
                   &qi_selected_visual_weights_);
+          lic_solver_ms += elapsed_ms(solver_begin);
         }
         else
         {
@@ -1622,27 +1714,33 @@ namespace cocolic
           qi_selected_visual_points_.clear();
           qi_selected_visual_pixels_.clear();
           qi_selected_visual_weights_.clear();
+          const auto solver_begin = ProfileClock::now();
           last_optimization_success =
               trajectory_manager_->UpdateTrajectoryWithLIC(
                   iter, msg.image_timestamp,
                   qi_selected_point_corrs_, {}, {}, 8,
                   &qi_selected_lidar_weights_, nullptr);
+          lic_solver_ms += elapsed_ms(solver_begin);
           trajectory_manager_->SetProcessCurImg(false);
         }
       }
       else if (process_image)
       {
+        const auto solver_begin = ProfileClock::now();
         last_optimization_success =
             trajectory_manager_->UpdateTrajectoryWithLIC(
             iter, msg.image_timestamp,
             lidar_handler_->GetPointCorrespondence(), v_points_, px_obss_, 8);
+        lic_solver_ms += elapsed_ms(solver_begin);
       }
       else
       {
+        const auto solver_begin = ProfileClock::now();
         last_optimization_success =
             trajectory_manager_->UpdateTrajectoryWithLIC(
             iter, msg.image_timestamp,
             lidar_handler_->GetPointCorrespondence(), {}, {}, 8);
+        lic_solver_ms += elapsed_ms(solver_begin);
         trajectory_manager_->SetProcessCurImg(false);
       }
     }
@@ -1654,6 +1752,11 @@ namespace cocolic
                  last_optimization_success);
       LogQiSummary();
     }
+    WriteExperimentProfile(
+        msg.lidar_timestamp, msg.image_timestamp, process_image,
+        last_optimization_success, ct_lidar_result, ct_recovery_result,
+        ct_detector_ms, qi_lidar_ms, qi_visual_ms, ct_recovery_ms,
+        lic_solver_ms, elapsed_ms(core_begin));
     PublishCloudAndTrajectory();
 
     /// [6] update visual global map
