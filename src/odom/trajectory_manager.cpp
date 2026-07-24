@@ -320,7 +320,9 @@ namespace cocolic
       const Eigen::aligned_vector<PointCorrespondence> &point_corrs,
       const Eigen::aligned_vector<Eigen::Vector3d> &pnp_3ds,
       const Eigen::aligned_vector<Eigen::Vector2d> &pnp_2ds,
-      const int iteration)
+      const int iteration,
+      const std::vector<double> *lidar_weights,
+      const std::vector<double> *pnp_weights)
   {
     if (point_corrs.empty() || imu_data_.empty() || imu_data_.size() == 1)
     {
@@ -370,24 +372,26 @@ namespace cocolic
     SO3d S_GtoM = SO3d(Eigen::Quaterniond::Identity());
     Eigen::Vector3d p_GinM = Eigen::Vector3d::Zero();
 
-    for (const auto &v : point_corrs)
+    for (size_t point_idx = 0; point_idx < point_corrs.size(); ++point_idx)
     {
+      const auto &v = point_corrs[point_idx];
       if (v.t_point < opt_min_t_ns)
         continue;
       if (v.t_point >= opt_max_t_ns)
         continue;
       if (v.t_point < tparam_.last_scan[1])
         continue;
-      if (use_lidar_scale)
+      double lidar_weight = opt_weight_.lidar_weight;
+      if (lidar_weights && lidar_weights->size() == point_corrs.size())
       {
-        estimator->AddLoamMeasurementAnalyticNURBS(v, S_GtoM, p_GinM, S_LtoI, p_LinI,
-                                                   opt_weight_.lidar_weight * v.scale);
+        lidar_weight = lidar_weights->at(point_idx);
       }
-      else
+      else if (use_lidar_scale)
       {
-        estimator->AddLoamMeasurementAnalyticNURBS(v, S_GtoM, p_GinM, S_LtoI, p_LinI,
-                                                   opt_weight_.lidar_weight);
+        lidar_weight *= v.scale;
       }
+      estimator->AddLoamMeasurementAnalyticNURBS(
+          v, S_GtoM, p_GinM, S_LtoI, p_LinI, lidar_weight);
     }
 
     // [2] imu factor
@@ -439,12 +443,17 @@ namespace cocolic
       cur_img_time_ = img_time_stamp;
       for (int i = 0; i < pnp_3ds.size(); i++)
       {
+        double image_weight = opt_weight_.image_weight;
+        if (pnp_weights && pnp_weights->size() == pnp_3ds.size())
+        {
+          image_weight = pnp_weights->at(i);
+        }
         estimator->AddPnPMeasurementAnalyticNURBS(
             pnp_3ds[i], pnp_2ds[i],
             img_time_stamp,
             trajectory_->GetSensorEP(CameraSensor).so3,
             trajectory_->GetSensorEP(CameraSensor).p,
-            K_, opt_weight_.image_weight);
+            K_, image_weight);
       }
     }
     else
@@ -487,7 +496,9 @@ namespace cocolic
   }
 
   void TrajectoryManager::UpdateLICPrior(
-      const Eigen::aligned_vector<PointCorrespondence> &point_corrs)
+      const Eigen::aligned_vector<PointCorrespondence> &point_corrs,
+      const std::vector<double> *lidar_weights,
+      const std::vector<double> *pnp_weights)
   {
     TrajectoryEstimatorOptions option;
     option.is_marg_state = true;
@@ -585,8 +596,9 @@ namespace cocolic
     Eigen::Vector3d p_LinI = trajectory_->GetSensorEP(LiDARSensor).p;
     SO3d S_GtoM = SO3d(Eigen::Quaterniond::Identity());
     Eigen::Vector3d p_GinM = Eigen::Vector3d::Zero();
-    for (const auto &v : point_corrs)
+    for (size_t point_idx = 0; point_idx < point_corrs.size(); ++point_idx)
     {
+      const auto &v = point_corrs[point_idx];
       if (v.t_point < opt_min_t_ns)
         continue;
       if (v.t_point >= opt_max_t_ns)
@@ -618,7 +630,11 @@ namespace cocolic
       if (!drop_set.empty())
       {
         double weight = opt_weight_.lidar_weight;
-        if (use_lidar_scale)
+        if (lidar_weights && lidar_weights->size() == point_corrs.size())
+        {
+          weight = lidar_weights->at(point_idx);
+        }
+        else if (use_lidar_scale)
         {
           weight *= v.scale;
         }
@@ -631,7 +647,8 @@ namespace cocolic
         Eigen::MatrixXd residuals;
         residuals.setZero(num_residuals, 1);
         cost_function->Evaluate(vec.data(), residuals.data(), nullptr);
-        double dist = (residuals / weight).norm();
+        double dist =
+            (residuals / std::max(std::abs(weight), 1.0e-12)).norm();
         if (dist < 0.05)
         // if (dist < 0.01)
         {
@@ -692,7 +709,10 @@ namespace cocolic
               v_points_[i], px_obss_[i],
               trajectory_->GetSensorEP(CameraSensor).so3,
               trajectory_->GetSensorEP(CameraSensor).p,
-              K_, opt_weight_.image_weight);
+              K_,
+              (pnp_weights && pnp_weights->size() == v_points_.size())
+                  ? pnp_weights->at(i)
+                  : opt_weight_.image_weight);
           ceres::LossFunction *loss_function = NULL;
           loss_function = new ceres::CauchyLoss(10.0); // adopted from vins-mono
           ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(RType_Image, cost_function, loss_function,

@@ -27,8 +27,13 @@
 #include <imu/imu_state_estimator.h>
 #include <imu/imu_initializer.h>
 #include <lidar/lidar_handler.h>
+#include <degeneracy/ct_lidar_observability.h>
+#include <degeneracy/ct_visual_recovery.h>
 
+#include <array>
 #include <condition_variable>
+#include <deque>
+#include <fstream>
 #include <mutex>
 #include <thread>
 
@@ -36,6 +41,69 @@
 
 namespace cocolic
 {
+
+  struct QiConfig
+  {
+    bool quality_enable = false;
+    bool lidar_quality_enable = true;
+    bool visual_quality_enable = true;
+    bool selection_enable = false;
+
+    double lidar_q_min = 0.5;
+    double lidar_q_max = 1.2;
+    double visual_q_min = 0.7;
+    double visual_q_max = 1.0;
+    double visual_point_quality_weight = 0.25;
+
+    int max_lidar_obs = 800;
+    int max_visual_obs = 200;
+    double selection_d_efficiency = 0.95;
+    double selection_min_gain = 1.0e-6;
+    double info_prior_eps = 1.0e-6;
+    bool output_csv = true;
+    bool log_enable = false;
+  };
+
+  struct QiLidarObs
+  {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    PointCorrespondence correspondence;
+    double q = 1.0;
+    double residual_pre = 0.0;
+    double residual_post = 0.0;
+    double base_weight = 1.0;
+    double final_weight = 1.0;
+    bool selected = false;
+    double info_gain = 0.0;
+    Eigen::Matrix<double, 6, 6> info =
+        Eigen::Matrix<double, 6, 6>::Zero();
+  };
+
+  struct QiVisualObs
+  {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    int point_id = -1;
+    RGB_pts *point_ptr = nullptr;
+    Eigen::Vector3d point = Eigen::Vector3d::Zero();
+    Eigen::Vector2d pixel = Eigen::Vector2d::Zero();
+    double q = 1.0;
+    double residual_pre = 0.0;
+    double residual_post = 0.0;
+    double frame_quality = 1.0;
+    double point_quality = 1.0;
+    double base_weight = 1.0;
+    double final_weight = 1.0;
+    bool selected = false;
+    double info_gain = 0.0;
+    Eigen::Matrix<double, 6, 6> info =
+        Eigen::Matrix<double, 6, 6>::Zero();
+  };
+
+  struct QiResidualScale
+  {
+    double sigma = 1.0;
+    bool ready = false;
+  };
 
   enum KnotDensity
   {
@@ -130,6 +198,58 @@ namespace cocolic
 
     void Publish3DGSMappingData(const NextMsgs& cur_msg);
 
+    void BuildVisualObs();
+    void PrepareQiVisualObs(int64_t image_timestamp);
+    void PrepareQiLidarObs(
+        const Eigen::aligned_vector<PointCorrespondence> &point_corrs);
+    void SelectQiLidarObs();
+    void SelectQiVisualObs();
+    CtVisualRecoveryResult PrepareCtVisualRecovery(
+        int64_t scan_timestamp,
+        int64_t image_timestamp,
+        const CtLidarObservabilityResult &lidar_result);
+    void UpdateQiResidualStatistics(int64_t image_timestamp,
+                                    bool process_image,
+                                    bool optimization_success);
+    void WriteQiCsv(int64_t scan_timestamp,
+                    int64_t image_timestamp,
+                    bool process_image,
+                    bool optimization_success);
+    void WriteExperimentProfile(
+        int64_t scan_timestamp, int64_t image_timestamp,
+        bool process_image, bool optimization_success,
+        const CtLidarObservabilityResult &lidar_result,
+        const CtVisualRecoveryResult &recovery_result,
+        double ct_detector_ms, double qi_lidar_ms,
+        double qi_visual_ms, double ct_recovery_ms,
+        double lic_solver_ms, double core_total_ms);
+    void LogQiSummary() const;
+
+    double ComputeLidarResidual(const PointCorrespondence &corr,
+                                const SE3d &T_lidar) const;
+    double ComputeVisualResidual(const QiVisualObs &obs,
+                                 const SE3d &T_cam) const;
+    Eigen::Matrix<double, 6, 6> ComputeLidarInfo(
+        const PointCorrespondence &corr,
+        const SE3d &T_lidar,
+        double final_weight) const;
+    Eigen::Matrix<double, 6, 6> ComputeVisualInfo(
+        const QiVisualObs &obs,
+        const SE3d &T_cam,
+        double final_weight) const;
+    double QiClamp(double value, double low, double high) const;
+    double QiMedian(std::vector<double> values) const;
+    QiResidualScale QiMadScale(const std::deque<double> &values) const;
+    double QiLogDet(const Eigen::Matrix<double, 6, 6> &mat) const;
+    double QiConditionNumber(
+        const Eigen::Matrix<double, 6, 6> &mat) const;
+    double QiDEfficiency(
+        const Eigen::Matrix<double, 6, 6> &selected,
+        const Eigen::Matrix<double, 6, 6> &full) const;
+    double QiMinDirectionRetention(
+        const Eigen::Matrix<double, 6, 6> &selected,
+        const Eigen::Matrix<double, 6, 6> &full) const;
+
   protected:
     OdometryMode odometry_mode_;
 
@@ -144,6 +264,9 @@ namespace cocolic
     LidarHandler::Ptr lidar_handler_;
 
     R3LIVE::Ptr camera_handler_;
+
+    CtLidarObservability::Ptr ct_lidar_observability_;
+    CtVisualRecovery::Ptr ct_visual_recovery_;
 
     int64_t t_begin_add_cam_; // 
 
@@ -210,6 +333,80 @@ namespace cocolic
     std::queue<LiDARFeature> lidar_buf;  // lidarfeature in local
     std::queue<cv::Mat> img_buf;  // undistorted
     std::vector<PosCloud::Ptr> lidarpoints;
+
+    QiConfig qi_config_;
+    double qi_lidar_weight_ = 1.0;
+    double qi_image_weight_ = 1.0;
+    double qi_characteristic_length_ = 1.0;
+    std::ofstream qi_csv_;
+    bool experiment_profile_enabled_ = false;
+    std::ofstream experiment_profile_csv_;
+
+    Eigen::aligned_vector<QiLidarObs> qi_lidar_obs_;
+    Eigen::aligned_vector<QiLidarObs> qi_selected_lidar_obs_;
+    Eigen::aligned_vector<QiVisualObs> qi_visual_obs_;
+    Eigen::aligned_vector<QiVisualObs> qi_selected_visual_obs_;
+
+    Eigen::aligned_vector<PointCorrespondence> qi_selected_point_corrs_;
+    Eigen::aligned_vector<Eigen::Vector3d> qi_selected_visual_points_;
+    Eigen::aligned_vector<Eigen::Vector2d> qi_selected_visual_pixels_;
+    std::vector<double> qi_selected_lidar_weights_;
+    std::vector<double> qi_selected_visual_weights_;
+
+    std::deque<double> qi_recent_lidar_residuals_;
+    std::deque<double> qi_recent_visual_residuals_;
+    std::deque<double> qi_recent_n_pnp_;
+    QiResidualScale qi_lidar_scale_;
+    QiResidualScale qi_visual_scale_;
+    double qi_n0_ = 1.0;
+    int64_t qi_last_visual_history_timestamp_ = -1;
+
+    double qi_last_lidar_pre_median_ = 0.0;
+    double qi_last_lidar_pre_mad_ = 0.0;
+    double qi_last_lidar_post_median_ = 0.0;
+    double qi_last_lidar_post_mad_ = 0.0;
+    double qi_last_visual_pre_median_ = 0.0;
+    double qi_last_visual_pre_mad_ = 0.0;
+    double qi_last_visual_post_median_ = 0.0;
+    double qi_last_visual_post_mad_ = 0.0;
+
+    double qi_last_lidar_logdet_ = 0.0;
+    double qi_last_visual_logdet_ = 0.0;
+    double qi_last_lidar_gain_mean_ = 0.0;
+    double qi_last_visual_gain_mean_ = 0.0;
+    double qi_last_lidar_cond_ = 0.0;
+    double qi_last_visual_cond_ = 0.0;
+    double qi_last_lidar_d_efficiency_ = 1.0;
+    double qi_last_visual_d_efficiency_ = 1.0;
+    double qi_last_lidar_min_direction_retention_ = 1.0;
+    double qi_last_visual_min_direction_retention_ = 1.0;
+
+    double qi_last_lidar_q_min_ = 1.0;
+    double qi_last_lidar_q_mean_ = 1.0;
+    double qi_last_lidar_q_max_ = 1.0;
+    double qi_last_lidar_scale_min_ = 1.0;
+    double qi_last_lidar_scale_mean_ = 1.0;
+    double qi_last_lidar_scale_max_ = 1.0;
+    double qi_last_lidar_base_weight_min_ = 1.0;
+    double qi_last_lidar_base_weight_mean_ = 1.0;
+    double qi_last_lidar_base_weight_max_ = 1.0;
+    double qi_last_lidar_weight_ratio_min_ = 1.0;
+    double qi_last_lidar_weight_ratio_mean_ = 1.0;
+    double qi_last_lidar_weight_ratio_max_ = 1.0;
+    double qi_last_visual_q_min_ = 1.0;
+    double qi_last_visual_q_mean_ = 1.0;
+    double qi_last_visual_q_max_ = 1.0;
+    double qi_last_visual_weight_ratio_min_ = 1.0;
+    double qi_last_visual_weight_ratio_mean_ = 1.0;
+    double qi_last_visual_weight_ratio_max_ = 1.0;
+
+    int qi_last_lidar_candidates_ = 0;
+    int qi_last_lidar_selected_ = 0;
+    int qi_last_visual_candidates_ = 0;
+    int qi_last_visual_selected_ = 0;
+    int qi_last_n_pnp_ = 0;
+    double qi_last_eta_pnp_ = 1.0;
+    double qi_last_eta_fmat_ = 1.0;
   };
 
 } // namespace cocolic

@@ -53,6 +53,13 @@ cd ~/catkin_coco/src/Coco-LIC && mkdir data
   
   The estimated IMU trajectory will be saved in the folder `./src/Coco-LIC/data`.
 
+## QI-CTDR experiments
+
+The reproducible experiment matrix, configuration switches, saving commands,
+ATE/RPE evaluation, detector ablation, recovery-policy controls, and runtime
+audit are documented in
+[docs/qi_ctdr_experiments.md](docs/qi_ctdr_experiments.md).
+
 ## Supplementary1 - non-uniform verification
 
 1 control point per 0.1 seconds 🥊 adaptively placing control points per 0.1 seconds.

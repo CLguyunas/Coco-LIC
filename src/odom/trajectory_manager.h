@@ -126,7 +126,9 @@ namespace cocolic
                            int64_t traj_max_time_ns, int knot_add_num, bool non_uniform);
 
     void UpdateLICPrior(
-        const Eigen::aligned_vector<PointCorrespondence> &point_corrs);
+        const Eigen::aligned_vector<PointCorrespondence> &point_corrs,
+        const std::vector<double> *lidar_weights = nullptr,
+        const std::vector<double> *pnp_weights = nullptr);
 
     void ClearLVIPrior()
     {
@@ -140,7 +142,9 @@ namespace cocolic
         const Eigen::aligned_vector<PointCorrespondence> &point_corrs,
         const Eigen::aligned_vector<Eigen::Vector3d> &pnp_3ds,
         const Eigen::aligned_vector<Eigen::Vector2d> &pnp_2ds,
-        const int iteration = 50);
+        const int iteration = 50,
+        const std::vector<double> *lidar_weights = nullptr,
+        const std::vector<double> *pnp_weights = nullptr);
 
     void UpdateLiDARAttribute(double scan_time_min, double scan_time_max);
 
