@@ -14,6 +14,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <lidar/lidar_feature.h>
 #include <spline/trajectory.h>
@@ -41,6 +42,15 @@ struct CtLidarObservabilityResult {
   Eigen::Matrix<double, 6, 1> relative_eigenvalues =
       Eigen::Matrix<double, 6, 1>::Zero();
   Eigen::Matrix<double, 6, Eigen::Dynamic> weak_basis;
+  // The following matrices are transient, non-logged interfaces for the
+  // visual-complement stage. `control_to_reference_pose` maps free control
+  // point perturbations to the characteristic-length-scaled reference pose.
+  // `reference_pose_lift` is its minimum-norm right inverse. Together they
+  // let an existing continuous-time factor be expressed in exactly the same
+  // six-dimensional tangent space as `weak_basis`.
+  std::vector<int> free_knot_indices;
+  Eigen::MatrixXd control_to_reference_pose;
+  Eigen::MatrixXd reference_pose_lift;
   std::string state = "invalid";
 };
 

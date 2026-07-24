@@ -28,6 +28,7 @@
 #include <imu/imu_initializer.h>
 #include <lidar/lidar_handler.h>
 #include <degeneracy/ct_lidar_observability.h>
+#include <degeneracy/ct_visual_recovery.h>
 
 #include <array>
 #include <condition_variable>
@@ -203,6 +204,10 @@ namespace cocolic
         const Eigen::aligned_vector<PointCorrespondence> &point_corrs);
     void SelectQiLidarObs();
     void SelectQiVisualObs();
+    CtVisualRecoveryResult PrepareCtVisualRecovery(
+        int64_t scan_timestamp,
+        int64_t image_timestamp,
+        const CtLidarObservabilityResult &lidar_result);
     void UpdateQiResidualStatistics(int64_t image_timestamp,
                                     bool process_image,
                                     bool optimization_success);
@@ -253,6 +258,7 @@ namespace cocolic
     R3LIVE::Ptr camera_handler_;
 
     CtLidarObservability::Ptr ct_lidar_observability_;
+    CtVisualRecovery::Ptr ct_visual_recovery_;
 
     int64_t t_begin_add_cam_; // 
 

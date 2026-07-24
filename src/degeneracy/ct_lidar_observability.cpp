@@ -310,13 +310,41 @@ CtLidarObservabilityResult CtLidarObservability::Analyze(
         Eigen::Matrix3d::Identity();
   }
 
+  Eigen::Matrix<double, 6, 6> scale =
+      Eigen::Matrix<double, 6, 6>::Identity();
+  scale.diagonal().head<3>().setConstant(result.characteristic_length);
+  const Eigen::MatrixXd scaled_pose_jacobian = scale * pose_jacobian;
+
   Eigen::JacobiSVD<Eigen::MatrixXd> pose_svd(
-      pose_jacobian, Eigen::ComputeThinU | Eigen::ComputeThinV);
+      scaled_pose_jacobian, Eigen::ComputeThinU | Eigen::ComputeThinV);
+  const double pose_rank_floor =
+      pose_svd.singularValues().size() > 0
+          ? std::max(kAbsoluteNumericalFloor,
+                     kRelativeNumericalFloor *
+                         pose_svd.singularValues()[0])
+          : kAbsoluteNumericalFloor;
   if (pose_svd.singularValues().size() < 6 ||
-      pose_svd.singularValues()[5] <= kAbsoluteNumericalFloor) {
+      !pose_svd.singularValues().allFinite() ||
+      pose_svd.singularValues()[5] <= pose_rank_floor) {
     WriteCsv(result);
     return result;
   }
+
+  result.free_knot_indices.resize(
+      static_cast<size_t>(result.free_knot_count), -1);
+  for (const auto& knot_block : knot_to_block) {
+    result.free_knot_indices[static_cast<size_t>(knot_block.second)] =
+        knot_block.first;
+  }
+  result.control_to_reference_pose = scaled_pose_jacobian;
+  const Eigen::VectorXd inverse_pose_singular_values =
+      pose_svd.singularValues().unaryExpr([](double value) {
+        return 1.0 / value;
+      });
+  result.reference_pose_lift =
+      pose_svd.matrixV() *
+      inverse_pose_singular_values.asDiagonal() *
+      pose_svd.matrixU().transpose();
 
   Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> knot_solver(
       lidar_information);
@@ -339,9 +367,6 @@ CtLidarObservabilityResult CtLidarObservability::Analyze(
 
   Eigen::Matrix<double, 6, 6> reference_covariance =
       pose_jacobian * knot_covariance * pose_jacobian.transpose();
-  Eigen::Matrix<double, 6, 6> scale =
-      Eigen::Matrix<double, 6, 6>::Identity();
-  scale.diagonal().head<3>().setConstant(result.characteristic_length);
   reference_covariance =
       scale * reference_covariance * scale.transpose();
   reference_covariance =

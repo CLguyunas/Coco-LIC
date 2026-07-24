@@ -39,6 +39,18 @@ ct_degeneracy:
   output_csv: true
   weak_eigenvalue_ratio: 3.0e-3
 
+# CT weak-direction-driven visual complement. It only reselects real tracked
+# 3D-2D observations already represented by Coco-LIC's PnPFactorNURBS. With
+# apply_to_estimator false it is a read-only shadow audit; with true, selected
+# observations enter the final LIC solve and its matching marginalization
+# prior without adding a new residual type. Requires ct_degeneracy.enabled,
+# qi_selection_enable, and lidar_iter >= 2.
+ct_visual_recovery:
+  enabled: false
+  apply_to_estimator: false
+  output_csv: true
+  max_additional_visual_observations: 64
+
 # Existing QI observation management, ported without coupling it to the
 # CT detector. Both master switches false reproduce the original path.
 qi_quality_enable: false

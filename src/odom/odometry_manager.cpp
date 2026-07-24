@@ -233,6 +233,28 @@ namespace cocolic
     qi_config_.max_lidar_obs = std::max(qi_config_.max_lidar_obs, 1);
     qi_config_.max_visual_obs = std::max(qi_config_.max_visual_obs, 1);
 
+    ct_visual_recovery_ = std::make_shared<CtVisualRecovery>(
+        node["ct_visual_recovery"], trajectory_, K_, cache_path_);
+    if (ct_visual_recovery_->Enabled())
+    {
+      if (!ct_lidar_observability_->Enabled())
+      {
+        std::cerr << "[CT-Visual] ct_degeneracy must be enabled. "
+                     "Recovery will remain inactive.\n";
+      }
+      if (!qi_config_.selection_enable)
+      {
+        std::cerr << "[CT-Visual] qi_selection_enable must be true so "
+                     "recovery has a fixed QI baseline and an unselected "
+                     "real-visual candidate pool.\n";
+      }
+      if (lidar_iter_ < 2)
+      {
+        std::cerr << "[CT-Visual] lidar_iter must be at least 2. "
+                     "Recovery will remain inactive.\n";
+      }
+    }
+
     const bool qi_enabled =
         qi_config_.quality_enable || qi_config_.selection_enable;
     if (qi_enabled && qi_config_.output_csv)
@@ -1050,6 +1072,53 @@ namespace cocolic
         QiMinDirectionRetention(lambda, lambda_full);
   }
 
+  CtVisualRecoveryResult OdometryManager::PrepareCtVisualRecovery(
+      int64_t scan_timestamp,
+      int64_t image_timestamp,
+      const CtLidarObservabilityResult &lidar_result)
+  {
+    CtVisualRecoveryResult result;
+    if (!ct_visual_recovery_ || !ct_visual_recovery_->Enabled())
+      return result;
+
+    Eigen::aligned_vector<CtVisualRecoveryObservation> observations;
+    observations.reserve(qi_visual_obs_.size());
+    for (size_t index = 0; index < qi_visual_obs_.size(); ++index)
+    {
+      const auto &source = qi_visual_obs_[index];
+      CtVisualRecoveryObservation observation;
+      observation.source_index = static_cast<int>(index);
+      observation.point = source.point;
+      observation.pixel = source.pixel;
+      observation.factor_weight = source.final_weight;
+      observation.baseline_selected = source.selected;
+      observations.push_back(observation);
+    }
+
+    result = ct_visual_recovery_->Select(
+        scan_timestamp, image_timestamp, lidar_result, observations,
+        qi_config_.selection_d_efficiency, qi_config_.info_prior_eps,
+        qi_config_.selection_min_gain);
+    if (!result.applied)
+      return result;
+
+    for (const int source_index : result.additional_source_indices)
+    {
+      if (source_index < 0 ||
+          source_index >= static_cast<int>(qi_visual_obs_.size()))
+        continue;
+      const auto &source =
+          qi_visual_obs_[static_cast<size_t>(source_index)];
+      if (source.selected)
+        continue;
+      qi_selected_visual_obs_.push_back(source);
+      qi_selected_visual_points_.push_back(source.point);
+      qi_selected_visual_pixels_.push_back(source.pixel);
+      qi_selected_visual_weights_.push_back(source.final_weight);
+    }
+    return result;
+  }
+
   void OdometryManager::UpdateQiResidualStatistics(
       int64_t image_timestamp, bool process_image,
       bool optimization_success)
@@ -1497,6 +1566,7 @@ namespace cocolic
     }
 
     bool last_optimization_success = false;
+    CtLidarObservabilityResult ct_lidar_result;
     for (int iter = 0; iter < lidar_iter_; ++iter)
     {
       lidar_handler_->GetLoamFeatureAssociation();
@@ -1516,7 +1586,7 @@ namespace cocolic
           reference_time_ns =
               std::min(reference_time_ns, trajectory_->knts.back() - 1);
         }
-        ct_lidar_observability_->Analyze(
+        ct_lidar_result = ct_lidar_observability_->Analyze(
             msg.lidar_timestamp, reference_time_ns,
             lidar_handler_->GetPointCorrespondence(),
             trajectory_manager_->opt_min_t_ns,
@@ -1531,6 +1601,12 @@ namespace cocolic
         if (process_image)
         {
           PrepareQiVisualObs(msg.image_timestamp);
+          if (iter == lidar_iter_ - 1)
+          {
+            PrepareCtVisualRecovery(
+                msg.lidar_timestamp, msg.image_timestamp,
+                ct_lidar_result);
+          }
           last_optimization_success =
               trajectory_manager_->UpdateTrajectoryWithLIC(
                   iter, msg.image_timestamp,
