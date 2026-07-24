@@ -37,6 +37,36 @@ Quality statistics are updated from the complete post-solve candidate pool,
 not the selected subset. Selection therefore cannot make its own future
 residual distribution appear artificially clean.
 
+## Relative information-preservation criterion
+
+The first I-only validation exposed a failure in the original stopping
+quantity. It normalized the selected log-determinant gain by the gain from a
+small numerical prior. Because the prior log determinant is a large negative
+number, roughly 10% of the observations could be reported as retaining 95% of
+the information even though the full-sequence position ATE increased by
+14.8%.
+
+The selector still ranks candidates by greedy D-optimal marginal gain, but its
+stopping quantity is now the dimension-normalized relative D-efficiency
+
+```text
+eta_D = exp((log det Lambda_selected - log det Lambda_full) / 6).
+```
+
+Both matrices receive the same scale-relative numerical regularizer, so the
+ratio is independent of an arbitrary absolute information scale. The
+implementation also records the weakest-direction retention
+
+```text
+eta_min = lambda_min(
+    Lambda_full^(-1/2) Lambda_selected Lambda_full^(-1/2)).
+```
+
+`eta_min` is diagnostic only: it introduces no additional threshold or route
+into the estimator. Candidate ranking uses an exact lazy-greedy evaluation of
+the same D-optimal objective, which preserves the greedy result while avoiding
+re-evaluation of every remaining candidate after every selection.
+
 ## Configuration
 
 Both master switches are off by default:
@@ -55,18 +85,30 @@ qi_visual_point_quality_weight: 0.25
 
 qi_max_lidar_obs: 800
 qi_max_visual_obs: 200
-qi_selection_info_ratio: 0.95
+qi_selection_d_efficiency: 0.95
 qi_selection_min_gain: 1.0e-6
 qi_info_prior_eps: 1.0e-6
 qi_output_csv: true
 qi_log_enable: false
 ```
 
+`qi_selection_info_ratio` remains accepted as a legacy alias so an existing
+local YAML does not silently fall back to a default. New configurations should
+use `qi_selection_d_efficiency`.
+
 The output file is:
 
 ```text
 data/<bag-name>_qi_observation.csv
 ```
+
+New CSVs identify the metric explicitly with
+`lidar_d_efficiency`, `visual_d_efficiency`,
+`lidar_min_direction_retention`, and
+`visual_min_direction_retention`. The analyzer still reads historical
+`*_info_coverage` files, but labels them as
+`legacy_logdet_gain_ratio`; it never presents those historical values as the
+corrected D-efficiency.
 
 ## Required ablation
 
@@ -81,8 +123,9 @@ Use identical base Coco-LIC parameters for all four runs:
 
 Do not enable CT-driven visual recovery in this experiment. Stage 2 must first
 show that QI has internally consistent weights, respects its observation
-budget, retains the requested information fraction where the budget permits,
-and does not create a trajectory failure.
+budget, retains the requested relative D-efficiency where the budget permits,
+does not collapse weakest-direction retention, and does not create a
+trajectory failure.
 
 Audit one or more QI runs with:
 
@@ -94,6 +137,6 @@ python3 tools/analyze_qi_observation.py \
 ```
 
 Trajectory accuracy and runtime are reported separately. The internal CSV is
-evidence for weight semantics, selected/candidate ratios, retained D-optimal
-information, and pre/post residual behaviour; it is not a substitute for
-trajectory evaluation.
+evidence for weight semantics, selected/candidate ratios, relative
+D-efficiency, weakest-direction retention, and pre/post residual behaviour;
+it is not a substitute for trajectory evaluation.

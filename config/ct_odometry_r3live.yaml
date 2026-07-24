@@ -57,7 +57,9 @@ qi_visual_point_quality_weight: 0.25
 # D-optimal hard budgets and adaptive stopping conditions.
 qi_max_lidar_obs: 800
 qi_max_visual_obs: 200
-qi_selection_info_ratio: 0.95
+# Dimension-normalized relative D-efficiency target. Selection may stop
+# earlier than the hard budget only after reaching this value.
+qi_selection_d_efficiency: 0.95
 qi_selection_min_gain: 1.0e-6
 qi_info_prior_eps: 1.0e-6
 qi_output_csv: true

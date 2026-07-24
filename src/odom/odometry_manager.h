@@ -56,7 +56,7 @@ namespace cocolic
 
     int max_lidar_obs = 800;
     int max_visual_obs = 200;
-    double selection_info_ratio = 0.95;
+    double selection_d_efficiency = 0.95;
     double selection_min_gain = 1.0e-6;
     double info_prior_eps = 1.0e-6;
     bool output_csv = true;
@@ -230,6 +230,12 @@ namespace cocolic
     double QiLogDet(const Eigen::Matrix<double, 6, 6> &mat) const;
     double QiConditionNumber(
         const Eigen::Matrix<double, 6, 6> &mat) const;
+    double QiDEfficiency(
+        const Eigen::Matrix<double, 6, 6> &selected,
+        const Eigen::Matrix<double, 6, 6> &full) const;
+    double QiMinDirectionRetention(
+        const Eigen::Matrix<double, 6, 6> &selected,
+        const Eigen::Matrix<double, 6, 6> &full) const;
 
   protected:
     OdometryMode odometry_mode_;
@@ -354,8 +360,10 @@ namespace cocolic
     double qi_last_visual_gain_mean_ = 0.0;
     double qi_last_lidar_cond_ = 0.0;
     double qi_last_visual_cond_ = 0.0;
-    double qi_last_lidar_info_coverage_ = 1.0;
-    double qi_last_visual_info_coverage_ = 1.0;
+    double qi_last_lidar_d_efficiency_ = 1.0;
+    double qi_last_visual_d_efficiency_ = 1.0;
+    double qi_last_lidar_min_direction_retention_ = 1.0;
+    double qi_last_visual_min_direction_retention_ = 1.0;
 
     double qi_last_lidar_q_min_ = 1.0;
     double qi_last_lidar_q_mean_ = 1.0;

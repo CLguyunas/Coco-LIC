@@ -22,6 +22,7 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <queue>
 
 #include <fstream>
 #include <iomanip>
@@ -33,6 +34,26 @@ std::fstream img_file;
 
 namespace cocolic
 {
+  namespace
+  {
+    struct QiLazyGainEntry
+    {
+      double gain = -1.0e30;
+      int index = -1;
+      int evaluated_round = -1;
+    };
+
+    struct QiLazyGainCompare
+    {
+      bool operator()(const QiLazyGainEntry &lhs,
+                      const QiLazyGainEntry &rhs) const
+      {
+        if (lhs.gain == rhs.gain)
+          return lhs.index > rhs.index;
+        return lhs.gain < rhs.gain;
+      }
+    };
+  } // namespace
 
   OdometryManager::OdometryManager(const YAML::Node &node, ros::NodeHandle &nh)
       : odometry_mode_(LIO), is_initialized_(false)
@@ -176,8 +197,9 @@ namespace cocolic
     qi_config_.max_visual_obs = yaml::GetValue<int>(
         node, "qi_max_visual_obs",
         yaml::GetValue<int>(node, "qim_max_visual_obs", 200));
-    qi_config_.selection_info_ratio = yaml::GetValue<double>(
-        node, "qi_selection_info_ratio", 0.95);
+    qi_config_.selection_d_efficiency = yaml::GetValue<double>(
+        node, "qi_selection_d_efficiency",
+        yaml::GetValue<double>(node, "qi_selection_info_ratio", 0.95));
     qi_config_.selection_min_gain = yaml::GetValue<double>(
         node, "qi_selection_min_gain", 1.0e-6);
     qi_config_.info_prior_eps = yaml::GetValue<double>(
@@ -202,8 +224,8 @@ namespace cocolic
         std::max(qi_config_.visual_q_max, qi_config_.visual_q_min);
     qi_config_.visual_point_quality_weight = QiClamp(
         qi_config_.visual_point_quality_weight, 0.0, 1.0);
-    qi_config_.selection_info_ratio = QiClamp(
-        qi_config_.selection_info_ratio, 0.0, 1.0);
+    qi_config_.selection_d_efficiency = QiClamp(
+        qi_config_.selection_d_efficiency, 0.0, 1.0);
     qi_config_.selection_min_gain =
         std::max(qi_config_.selection_min_gain, 0.0);
     qi_config_.info_prior_eps =
@@ -222,16 +244,19 @@ namespace cocolic
         qi_csv_
             << "scan_time_ns,image_time_ns,process_image,"
                "optimization_success,quality_enabled,selection_enabled,"
+               "selection_d_efficiency_target,"
                "characteristic_length,"
                "lidar_candidates,lidar_selected,lidar_q_min,lidar_q_mean,"
                "lidar_q_max,lidar_weight_ratio_min,lidar_weight_ratio_mean,"
-               "lidar_weight_ratio_max,lidar_info_coverage,"
+               "lidar_weight_ratio_max,lidar_d_efficiency,"
+               "lidar_min_direction_retention,"
                "lidar_condition_number,lidar_pre_median,lidar_pre_mad,"
                "lidar_post_median,lidar_post_mad,lidar_sigma,"
                "visual_candidates,visual_selected,visual_q_min,"
                "visual_q_mean,visual_q_max,visual_weight_ratio_min,"
                "visual_weight_ratio_mean,visual_weight_ratio_max,"
-               "visual_info_coverage,visual_condition_number,"
+               "visual_d_efficiency,"
+               "visual_min_direction_retention,visual_condition_number,"
                "visual_pre_median,visual_pre_mad,visual_post_median,"
                "visual_post_mad,visual_sigma,pnp_inliers,"
                "pnp_over_fmat,fmat_over_track\n";
@@ -430,6 +455,35 @@ namespace cocolic
     return max_eigenvalue / min_eigenvalue;
   }
 
+  double OdometryManager::QiDEfficiency(
+      const Eigen::Matrix<double, 6, 6> &selected,
+      const Eigen::Matrix<double, 6, 6> &full) const
+  {
+    constexpr double state_dimension = 6.0;
+    const double log_ratio =
+        (QiLogDet(selected) - QiLogDet(full)) / state_dimension;
+    if (!std::isfinite(log_ratio))
+      return 0.0;
+    return QiClamp(std::exp(std::min(log_ratio, 0.0)), 0.0, 1.0);
+  }
+
+  double OdometryManager::QiMinDirectionRetention(
+      const Eigen::Matrix<double, 6, 6> &selected,
+      const Eigen::Matrix<double, 6, 6> &full) const
+  {
+    const Eigen::Matrix<double, 6, 6> selected_symmetric =
+        0.5 * (selected + selected.transpose());
+    const Eigen::Matrix<double, 6, 6> full_symmetric =
+        0.5 * (full + full.transpose());
+    Eigen::GeneralizedSelfAdjointEigenSolver<
+        Eigen::Matrix<double, 6, 6>> solver(
+            selected_symmetric, full_symmetric,
+            Eigen::EigenvaluesOnly);
+    if (solver.info() != Eigen::Success)
+      return 0.0;
+    return QiClamp(solver.eigenvalues().minCoeff(), 0.0, 1.0);
+  }
+
   void OdometryManager::BuildVisualObs()
   {
     qi_visual_obs_.clear();
@@ -475,7 +529,8 @@ namespace cocolic
       qi_last_visual_logdet_ = 0.0;
       qi_last_visual_gain_mean_ = 0.0;
       qi_last_visual_cond_ = 0.0;
-      qi_last_visual_info_coverage_ = 0.0;
+      qi_last_visual_d_efficiency_ = 0.0;
+      qi_last_visual_min_direction_retention_ = 0.0;
       qi_last_visual_pre_median_ = 0.0;
       qi_last_visual_pre_mad_ = 0.0;
       qi_last_visual_post_median_ = 0.0;
@@ -603,7 +658,8 @@ namespace cocolic
       qi_last_lidar_logdet_ = 0.0;
       qi_last_lidar_gain_mean_ = 0.0;
       qi_last_lidar_cond_ = 0.0;
-      qi_last_lidar_info_coverage_ = 0.0;
+      qi_last_lidar_d_efficiency_ = 0.0;
+      qi_last_lidar_min_direction_retention_ = 0.0;
       qi_last_lidar_pre_median_ = 0.0;
       qi_last_lidar_pre_mad_ = 0.0;
       qi_last_lidar_post_median_ = 0.0;
@@ -695,16 +751,20 @@ namespace cocolic
     const int budget = std::min(
         qi_config_.max_lidar_obs,
         static_cast<int>(qi_lidar_obs_.size()));
+    Eigen::Matrix<double, 6, 6> information_full =
+        Eigen::Matrix<double, 6, 6>::Zero();
+    for (const auto &obs : qi_lidar_obs_)
+      information_full += obs.info;
+    double information_scale = information_full.trace() / 6.0;
+    if (!std::isfinite(information_scale) ||
+        information_scale <= 1.0e-12)
+      information_scale = 1.0;
     const Eigen::Matrix<double, 6, 6> lambda0 =
-        qi_config_.info_prior_eps *
+        qi_config_.info_prior_eps * information_scale *
         Eigen::Matrix<double, 6, 6>::Identity();
     Eigen::Matrix<double, 6, 6> lambda = lambda0;
-    Eigen::Matrix<double, 6, 6> lambda_full = lambda0;
-    for (const auto &obs : qi_lidar_obs_)
-      lambda_full += obs.info;
-    const double base_logdet = QiLogDet(lambda0);
-    const double full_gain =
-        std::max(QiLogDet(lambda_full) - base_logdet, 1.0e-12);
+    const Eigen::Matrix<double, 6, 6> lambda_full =
+        lambda0 + information_full;
 
     double gain_sum = 0.0;
     if (!qi_config_.selection_enable)
@@ -719,24 +779,52 @@ namespace cocolic
     else
     {
       std::vector<char> used(qi_lidar_obs_.size(), 0);
+      std::priority_queue<QiLazyGainEntry,
+                          std::vector<QiLazyGainEntry>,
+                          QiLazyGainCompare> gain_queue;
+      const double initial_logdet = QiLogDet(lambda);
+      for (size_t index = 0; index < qi_lidar_obs_.size(); ++index)
+      {
+        QiLazyGainEntry entry;
+        entry.gain =
+            QiLogDet(lambda + qi_lidar_obs_[index].info) -
+            initial_logdet;
+        entry.index = static_cast<int>(index);
+        entry.evaluated_round = 0;
+        gain_queue.push(entry);
+      }
+
       for (int selected_count = 0;
            selected_count < budget; ++selected_count)
       {
         const double current_logdet = QiLogDet(lambda);
         double best_gain = -1.0e30;
         int best_index = -1;
-        for (size_t index = 0; index < qi_lidar_obs_.size(); ++index)
+        while (!gain_queue.empty())
         {
-          if (used[index])
+          QiLazyGainEntry entry = gain_queue.top();
+          gain_queue.pop();
+          if (entry.index < 0 ||
+              used[static_cast<size_t>(entry.index)])
             continue;
-          const double gain =
-              QiLogDet(lambda + qi_lidar_obs_[index].info) -
-              current_logdet;
-          if (gain > best_gain)
+
+          if (entry.evaluated_round != selected_count)
           {
-            best_gain = gain;
-            best_index = static_cast<int>(index);
+            entry.gain = QiLogDet(
+                lambda +
+                qi_lidar_obs_[static_cast<size_t>(entry.index)].info) -
+                current_logdet;
+            entry.evaluated_round = selected_count;
           }
+
+          if (gain_queue.empty() ||
+              entry.gain >= gain_queue.top().gain - 1.0e-12)
+          {
+            best_gain = entry.gain;
+            best_index = entry.index;
+            break;
+          }
+          gain_queue.push(entry);
         }
         if (best_index < 0)
           break;
@@ -752,10 +840,10 @@ namespace cocolic
         qi_selected_lidar_obs_.push_back(
             qi_lidar_obs_[best_index]);
 
-        const double coverage = QiClamp(
-            (QiLogDet(lambda) - base_logdet) / full_gain, 0.0, 1.0);
+        const double d_efficiency =
+            QiDEfficiency(lambda, lambda_full);
         if (selected_count + 1 >= 6 &&
-            coverage >= qi_config_.selection_info_ratio)
+            d_efficiency >= qi_config_.selection_d_efficiency)
           break;
       }
     }
@@ -812,8 +900,10 @@ namespace cocolic
     qi_last_lidar_cond_ = QiConditionNumber(lambda);
     qi_last_lidar_gain_mean_ =
         selected > 0 ? gain_sum / selected : 0.0;
-    qi_last_lidar_info_coverage_ = QiClamp(
-        (QiLogDet(lambda) - base_logdet) / full_gain, 0.0, 1.0);
+    qi_last_lidar_d_efficiency_ =
+        QiDEfficiency(lambda, lambda_full);
+    qi_last_lidar_min_direction_retention_ =
+        QiMinDirectionRetention(lambda, lambda_full);
   }
 
   void OdometryManager::SelectQiVisualObs()
@@ -828,16 +918,20 @@ namespace cocolic
     const int budget = std::min(
         qi_config_.max_visual_obs,
         static_cast<int>(qi_visual_obs_.size()));
+    Eigen::Matrix<double, 6, 6> information_full =
+        Eigen::Matrix<double, 6, 6>::Zero();
+    for (const auto &obs : qi_visual_obs_)
+      information_full += obs.info;
+    double information_scale = information_full.trace() / 6.0;
+    if (!std::isfinite(information_scale) ||
+        information_scale <= 1.0e-12)
+      information_scale = 1.0;
     const Eigen::Matrix<double, 6, 6> lambda0 =
-        qi_config_.info_prior_eps *
+        qi_config_.info_prior_eps * information_scale *
         Eigen::Matrix<double, 6, 6>::Identity();
     Eigen::Matrix<double, 6, 6> lambda = lambda0;
-    Eigen::Matrix<double, 6, 6> lambda_full = lambda0;
-    for (const auto &obs : qi_visual_obs_)
-      lambda_full += obs.info;
-    const double base_logdet = QiLogDet(lambda0);
-    const double full_gain =
-        std::max(QiLogDet(lambda_full) - base_logdet, 1.0e-12);
+    const Eigen::Matrix<double, 6, 6> lambda_full =
+        lambda0 + information_full;
 
     double gain_sum = 0.0;
     if (!qi_config_.selection_enable)
@@ -852,24 +946,52 @@ namespace cocolic
     else
     {
       std::vector<char> used(qi_visual_obs_.size(), 0);
+      std::priority_queue<QiLazyGainEntry,
+                          std::vector<QiLazyGainEntry>,
+                          QiLazyGainCompare> gain_queue;
+      const double initial_logdet = QiLogDet(lambda);
+      for (size_t index = 0; index < qi_visual_obs_.size(); ++index)
+      {
+        QiLazyGainEntry entry;
+        entry.gain =
+            QiLogDet(lambda + qi_visual_obs_[index].info) -
+            initial_logdet;
+        entry.index = static_cast<int>(index);
+        entry.evaluated_round = 0;
+        gain_queue.push(entry);
+      }
+
       for (int selected_count = 0;
            selected_count < budget; ++selected_count)
       {
         const double current_logdet = QiLogDet(lambda);
         double best_gain = -1.0e30;
         int best_index = -1;
-        for (size_t index = 0; index < qi_visual_obs_.size(); ++index)
+        while (!gain_queue.empty())
         {
-          if (used[index])
+          QiLazyGainEntry entry = gain_queue.top();
+          gain_queue.pop();
+          if (entry.index < 0 ||
+              used[static_cast<size_t>(entry.index)])
             continue;
-          const double gain =
-              QiLogDet(lambda + qi_visual_obs_[index].info) -
-              current_logdet;
-          if (gain > best_gain)
+
+          if (entry.evaluated_round != selected_count)
           {
-            best_gain = gain;
-            best_index = static_cast<int>(index);
+            entry.gain = QiLogDet(
+                lambda +
+                qi_visual_obs_[static_cast<size_t>(entry.index)].info) -
+                current_logdet;
+            entry.evaluated_round = selected_count;
           }
+
+          if (gain_queue.empty() ||
+              entry.gain >= gain_queue.top().gain - 1.0e-12)
+          {
+            best_gain = entry.gain;
+            best_index = entry.index;
+            break;
+          }
+          gain_queue.push(entry);
         }
         if (best_index < 0)
           break;
@@ -885,10 +1007,10 @@ namespace cocolic
         qi_selected_visual_obs_.push_back(
             qi_visual_obs_[best_index]);
 
-        const double coverage = QiClamp(
-            (QiLogDet(lambda) - base_logdet) / full_gain, 0.0, 1.0);
+        const double d_efficiency =
+            QiDEfficiency(lambda, lambda_full);
         if (selected_count + 1 >= 6 &&
-            coverage >= qi_config_.selection_info_ratio)
+            d_efficiency >= qi_config_.selection_d_efficiency)
           break;
       }
     }
@@ -922,8 +1044,10 @@ namespace cocolic
     qi_last_visual_cond_ = QiConditionNumber(lambda);
     qi_last_visual_gain_mean_ =
         selected > 0 ? gain_sum / selected : 0.0;
-    qi_last_visual_info_coverage_ = QiClamp(
-        (QiLogDet(lambda) - base_logdet) / full_gain, 0.0, 1.0);
+    qi_last_visual_d_efficiency_ =
+        QiDEfficiency(lambda, lambda_full);
+    qi_last_visual_min_direction_retention_ =
+        QiMinDirectionRetention(lambda, lambda_full);
   }
 
   void OdometryManager::UpdateQiResidualStatistics(
@@ -1045,11 +1169,12 @@ namespace cocolic
               << qi_last_lidar_pre_mad_
               << " post med/mad " << qi_last_lidar_post_median_ << "/"
               << qi_last_lidar_post_mad_
-              << " logdet/gain/cond/coverage "
+              << " logdet/gain/cond/d_eff/min_dir "
               << qi_last_lidar_logdet_ << "/"
               << qi_last_lidar_gain_mean_ << "/"
               << qi_last_lidar_cond_ << "/"
-              << qi_last_lidar_info_coverage_
+              << qi_last_lidar_d_efficiency_ << "/"
+              << qi_last_lidar_min_direction_retention_
               << RESET << std::endl;
 
     std::cout << GREEN << "[QI] Visual cand/sel "
@@ -1074,11 +1199,12 @@ namespace cocolic
               << qi_last_visual_pre_mad_
               << " post med/mad " << qi_last_visual_post_median_ << "/"
               << qi_last_visual_post_mad_
-              << " logdet/gain/cond/coverage "
+              << " logdet/gain/cond/d_eff/min_dir "
               << qi_last_visual_logdet_ << "/"
               << qi_last_visual_gain_mean_ << "/"
               << qi_last_visual_cond_ << "/"
-              << qi_last_visual_info_coverage_
+              << qi_last_visual_d_efficiency_ << "/"
+              << qi_last_visual_min_direction_retention_
               << RESET << std::endl;
   }
 
@@ -1096,6 +1222,7 @@ namespace cocolic
         << static_cast<int>(optimization_success) << ","
         << static_cast<int>(qi_config_.quality_enable) << ","
         << static_cast<int>(qi_config_.selection_enable) << ","
+        << qi_config_.selection_d_efficiency << ","
         << qi_characteristic_length_ << ","
         << qi_last_lidar_candidates_ << ","
         << qi_last_lidar_selected_ << ","
@@ -1105,7 +1232,8 @@ namespace cocolic
         << qi_last_lidar_weight_ratio_min_ << ","
         << qi_last_lidar_weight_ratio_mean_ << ","
         << qi_last_lidar_weight_ratio_max_ << ","
-        << qi_last_lidar_info_coverage_ << ","
+        << qi_last_lidar_d_efficiency_ << ","
+        << qi_last_lidar_min_direction_retention_ << ","
         << qi_last_lidar_cond_ << ","
         << qi_last_lidar_pre_median_ << ","
         << qi_last_lidar_pre_mad_ << ","
@@ -1120,7 +1248,8 @@ namespace cocolic
         << qi_last_visual_weight_ratio_min_ << ","
         << qi_last_visual_weight_ratio_mean_ << ","
         << qi_last_visual_weight_ratio_max_ << ","
-        << qi_last_visual_info_coverage_ << ","
+        << qi_last_visual_d_efficiency_ << ","
+        << qi_last_visual_min_direction_retention_ << ","
         << qi_last_visual_cond_ << ","
         << qi_last_visual_pre_median_ << ","
         << qi_last_visual_pre_mad_ << ","
@@ -1354,7 +1483,8 @@ namespace cocolic
         qi_last_visual_weight_ratio_min_ = 1.0;
         qi_last_visual_weight_ratio_mean_ = 1.0;
         qi_last_visual_weight_ratio_max_ = 1.0;
-        qi_last_visual_info_coverage_ = 0.0;
+        qi_last_visual_d_efficiency_ = 0.0;
+        qi_last_visual_min_direction_retention_ = 0.0;
         qi_last_visual_cond_ = 0.0;
         qi_last_visual_pre_median_ = 0.0;
         qi_last_visual_pre_mad_ = 0.0;
